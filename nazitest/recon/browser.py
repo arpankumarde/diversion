@@ -51,7 +51,11 @@ class BrowserController:
             config.add_argument(f"--proxy-server={self.proxy_url}")
 
         self._browser = await zd.start(config)
-        self._page = await self._browser.get("about:blank")
+        try:
+            self._page = await self._browser.get("about:blank")
+        except Exception:
+            await self.stop()
+            raise
         logger.info("Browser started")
 
     async def stop(self) -> None:

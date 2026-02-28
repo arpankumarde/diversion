@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -256,8 +257,6 @@ class OpenRouterClient:
                     # Rate limited — back off
                     wait = min(2**attempt * 2, 30)
                     logger.warning("Rate limited, waiting %ds...", wait)
-                    import asyncio
-
                     await asyncio.sleep(wait)
                     continue
 
@@ -289,7 +288,11 @@ class OpenRouterClient:
 
                 # Extract response
                 choices = data.get("choices", [])
-                content = choices[0]["message"]["content"] if choices else ""
+                content = (
+                    choices[0].get("message", {}).get("content", "")
+                    if choices
+                    else ""
+                )
 
                 return {
                     "content": content,
@@ -303,8 +306,6 @@ class OpenRouterClient:
 
             except httpx.HTTPStatusError as e:
                 if attempt < max_retries - 1 and e.response.status_code >= 500:
-                    import asyncio
-
                     await asyncio.sleep(2**attempt)
                     continue
                 raise

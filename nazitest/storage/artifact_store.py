@@ -105,10 +105,16 @@ class ArtifactStore:
         filepath.write_bytes(b"\n".join(lines))
         return filepath
 
+    def _validate_path(self, target_dir: Path, filepath: Path) -> None:
+        """Ensure filepath is within target_dir (prevent path traversal)."""
+        if not filepath.resolve().is_relative_to(target_dir.resolve()):
+            raise ValueError(f"Path traversal attempt: {filepath}")
+
     def load(self, artifact_type: ArtifactType, filename: str) -> dict:
         """Load a JSON artifact by filename."""
         target_dir = self._resolve_dir(artifact_type)
         filepath = target_dir / filename
+        self._validate_path(target_dir, filepath)
         if not filepath.exists():
             raise FileNotFoundError(f"Artifact not found: {filepath}")
         return orjson.loads(filepath.read_bytes())
@@ -117,6 +123,7 @@ class ArtifactStore:
         """Load a binary artifact (e.g., screenshot)."""
         target_dir = self._resolve_dir(artifact_type)
         filepath = target_dir / filename
+        self._validate_path(target_dir, filepath)
         if not filepath.exists():
             raise FileNotFoundError(f"Artifact not found: {filepath}")
         return filepath.read_bytes()

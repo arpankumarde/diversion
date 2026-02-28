@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_mod
 import logging
 import time
 from pathlib import Path
@@ -155,6 +156,7 @@ class ReportGenerator:
 
     def _render_minimal_html(self, data: dict) -> Path:
         """Minimal HTML report when template is missing."""
+        esc = html_mod.escape
         meta = data.get("metadata", {})
         summary = data.get("summary", {})
         vulns = data.get("vulnerabilities", [])
@@ -162,8 +164,10 @@ class ReportGenerator:
         vuln_rows = ""
         for v in vulns:
             vuln_rows += (
-                f"<tr><td>{v['severity']}</td><td>{v['title']}</td>"
-                f"<td>{v['endpoint']}</td><td>{v['confidence']:.0%}</td></tr>\n"
+                f"<tr><td>{esc(str(v['severity']))}</td>"
+                f"<td>{esc(str(v['title']))}</td>"
+                f"<td>{esc(str(v['endpoint']))}</td>"
+                f"<td>{v['confidence']:.0%}</td></tr>\n"
             )
 
         html = f"""<!DOCTYPE html>
@@ -179,9 +183,9 @@ th {{ background: #333; color: white; }}
 .low {{ color: #388e3c; }}
 </style></head><body>
 <h1>NAZITEST Security Report</h1>
-<p><strong>Target:</strong> {meta.get('target_url', 'N/A')}</p>
-<p><strong>Run ID:</strong> {meta.get('run_id', 'N/A')}</p>
-<p><strong>Generated:</strong> {meta.get('generated_at', 'N/A')}</p>
+<p><strong>Target:</strong> {esc(str(meta.get('target_url', 'N/A')))}</p>
+<p><strong>Run ID:</strong> {esc(str(meta.get('run_id', 'N/A')))}</p>
+<p><strong>Generated:</strong> {esc(str(meta.get('generated_at', 'N/A')))}</p>
 <h2>Summary</h2>
 <p>Total hypotheses: {summary.get('total_hypotheses', 0)}<br>
 Confirmed vulnerabilities: {summary.get('confirmed_vulnerabilities', 0)}<br>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from itertools import cycle
+from urllib.parse import quote
 
 from nazitest.models.config import ProxyConfig, ProxyEntry
 from nazitest.models.types import RotationStrategy
@@ -65,9 +66,11 @@ class ProxyManager:
 
         url = proxy.url
         if proxy.username and proxy.password:
-            # Insert auth into URL
+            # Insert auth into URL (percent-encode credentials for safety)
             proto, rest = url.split("://", 1)
-            url = f"{proto}://{proxy.username}:{proxy.password}@{rest}"
+            user = quote(proxy.username, safe="")
+            passwd = quote(proxy.password, safe="")
+            url = f"{proto}://{user}:{passwd}@{rest}"
         return url
 
     def mark_burned(self, proxy_url: str, reason: str = "") -> None:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -49,16 +52,27 @@ class Settings(BaseModel):
 
 def load_models_config(path: Path) -> ModelsConfig:
     """Parse models.yaml into ModelsConfig."""
-    with open(path) as f:
-        raw = yaml.safe_load(f)
+    try:
+        with open(path) as f:
+            raw = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        logger.warning("Failed to parse %s: %s — using defaults", path, e)
+        return ModelsConfig()
 
     if not raw:
         return ModelsConfig()
 
     models: dict[str, ModelConfig] = {}
     for role, cfg in raw.get("models", {}).items():
+        if not isinstance(cfg, dict):
+            logger.warning("Skipping invalid model config for role '%s'", role)
+            continue
+        model_id = cfg.get("id")
+        if not model_id:
+            logger.warning("Skipping model role '%s' — missing 'id' field", role)
+            continue
         models[role] = ModelConfig(
-            id=cfg["id"],
+            id=model_id,
             temperature=cfg.get("temperature", 0.3),
             max_tokens=cfg.get("max_tokens", 8192),
             description=cfg.get("description", ""),

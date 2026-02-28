@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from nazitest.models.types import EdgeType, NodeType, Severity
 
@@ -54,6 +54,11 @@ class Hypothesis(BaseModel):
     cvss_score: float | None = None
     confirmed: bool = False
     exploitation_attempted: bool = False
+
+    @field_validator("confidence")
+    @classmethod
+    def clamp_confidence(cls, v: float) -> float:
+        return max(0.0, min(1.0, v))
 
     def is_ready_for_exploitation(self) -> bool:
         return self.confidence > 0.75

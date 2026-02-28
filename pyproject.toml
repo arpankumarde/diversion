@@ -42,6 +42,9 @@ dependencies = [
     "cryptography",
     # YAML config
     "pyyaml",
+    # API server
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 [project.scripts]

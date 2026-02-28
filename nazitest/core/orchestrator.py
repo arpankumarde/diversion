@@ -39,12 +39,18 @@ class Orchestrator:
     Manages phase transitions, human-in-loop gates, error recovery, run persistence.
     """
 
-    def __init__(self, config: RunConfig, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        config: RunConfig,
+        settings: Settings | None = None,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
         self.config = config
         self.settings = settings or Settings.load(config.models_config_path)
         self.phase = OrchestratorPhase.INIT
         self.run_id: str = ""
         self.run_path: Path = Path()
+        self._stop_event = stop_event
 
         # Core components
         self.run_manager = RunManager(config.output_dir)
@@ -199,14 +205,21 @@ class Orchestrator:
             # Navigate to the target
             await browser.navigate(target_url)
 
-            console.print(
-                "\n[bold yellow]Browse the target in the browser window.[/bold yellow]"
-                "\n[bold yellow]Press ENTER here when done...[/bold yellow]\n"
-            )
-
-            # Block until user presses ENTER (non-blocking for the event loop)
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, input)
+            if self._stop_event:
+                # Server mode: wait for stop signal from API
+                console.print(
+                    "\n[bold yellow]Browse the target in the browser window.[/bold yellow]"
+                    "\n[bold yellow]Call POST /api/scans/{run_id}/stop when done.[/bold yellow]\n"
+                )
+                await self._stop_event.wait()
+            else:
+                # CLI mode: block until user presses ENTER
+                console.print(
+                    "\n[bold yellow]Browse the target in the browser window.[/bold yellow]"
+                    "\n[bold yellow]Press ENTER here when done...[/bold yellow]\n"
+                )
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, input)
 
             console.print(f"[blue]Finishing up — captured {len(pages_captured)} pages[/blue]")
 

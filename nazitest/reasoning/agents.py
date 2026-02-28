@@ -287,8 +287,8 @@ class Strategist(BaseAgent):
                     )
                 )
             return hypotheses
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            logger.warning("JSON hypothesis parsing failed: %s", e)
 
         # Fallback: split on "HYPOTHESIS N:" pattern
         hypotheses = []
@@ -381,6 +381,12 @@ class Strategist(BaseAgent):
                     ),
                     cwe_id=cwe.strip() if cwe else "",
                 )
+            )
+        if not hypotheses:
+            logger.warning(
+                "All hypothesis parsing failed — LLM response may be malformed. "
+                "Raw preview: %s",
+                raw[:200],
             )
         return hypotheses
 
