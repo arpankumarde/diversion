@@ -1026,8 +1026,17 @@ class Orchestrator:
         )
 
     def _build_graph_phase3(self, xref: XRefResult) -> None:
-        """Inject codebase cross-reference into knowledge graph (Phase 3)."""
+        """Inject codebase cross-reference into knowledge graph (Phase 3).
+
+        FIX 5: Uses source_module to find sinks in the handler's actual source file,
+        not just sinks co-located with the route registration.
+        """
         assert self.store is not None
+
+        # Pre-index sinks by file for fast lookup
+        sinks_by_file: dict[str, list] = {}
+        for s in xref.sink_flows:
+            sinks_by_file.setdefault(s.file_path, []).append(s)
 
         # Create CODE_HANDLER nodes for each route
         for route in xref.routes:
@@ -1052,15 +1061,38 @@ class Orchestrator:
                         ep_id, handler_id, EdgeType.HANDLED_BY,
                     )
 
-            # Annotate handler with nearby sinks
-            nearby_sinks = [
-                s for s in xref.sink_flows
-                if s.file_path == route.file_path
-                and abs(s.line_number - route.line_number) <= 50
-            ]
+            # FIX 5: Find sinks in the handler's actual source file
+            # Priority 1: source_module (the imported handler file)
+            # Priority 2: same file as route registration, within ±50 lines
+            handler_files = set()
+            if route.source_module:
+                # source_module is like "routes/search" — try with extensions
+                for ext in (".ts", ".js", ".py", ".java", ".go", ".rb", ".php", ""):
+                    candidate = route.source_module + ext
+                    if candidate in sinks_by_file:
+                        handler_files.add(candidate)
+                        break
+            handler_files.add(route.file_path)
+
+            nearby_sinks = []
+            for hf in handler_files:
+                for s in sinks_by_file.get(hf, []):
+                    if hf == route.file_path:
+                        # Same file: require proximity
+                        if abs(s.line_number - route.line_number) <= 50:
+                            nearby_sinks.append(s)
+                    else:
+                        # Handler source file: all sinks are relevant
+                        nearby_sinks.append(s)
+
             if nearby_sinks:
-                sink_types = list({s.sink_type for s in nearby_sinks})
+                sink_types = sorted({s.sink_type for s in nearby_sinks})
+                sink_details = [
+                    f"{s.sink_type}: {s.sink} at {s.file_path}:{s.line_number}"
+                    for s in nearby_sinks
+                ]
                 self.knowledge_graph._graph.nodes[handler_id]["nearby_sinks"] = sink_types
+                self.knowledge_graph._graph.nodes[handler_id]["sink_details"] = sink_details
 
         # Save updated graph
         self.store.save(
@@ -1069,25 +1101,77 @@ class Orchestrator:
         )
 
     def _build_code_context(self) -> dict | None:
-        """Build code context dict from xref result for LLM reasoning."""
+        """Build code context dict from xref result for LLM reasoning.
+
+        FIX 6: Prioritizes security-relevant findings, deduplicates,
+        and correlates routes with their nearby sinks.
+        """
         if not self._xref_result:
             return None
 
-        xref = self._xref_result
-        routes = [
-            r.model_dump(mode="json") for r in xref.routes[:20]
-        ]
-        sinks = [
-            s.model_dump(mode="json") for s in xref.sink_flows[:20]
-        ]
-        auth = xref.auth_patterns[:10]
+        from nazitest.analysis.codebase_xref import SINK_DANGER_RANK
 
-        if not routes and not sinks and not auth:
+        xref = self._xref_result
+
+        # Sort sinks by danger rank (sql/command first), deduplicate
+        seen_sinks: set[str] = set()
+        ranked_sinks = sorted(
+            xref.sink_flows,
+            key=lambda s: SINK_DANGER_RANK.get(s.sink_type, 0),
+            reverse=True,
+        )
+        deduped_sinks: list[dict] = []
+        for s in ranked_sinks:
+            key = f"{s.sink}:{s.file_path}:{s.line_number}"
+            if key not in seen_sinks:
+                seen_sinks.add(key)
+                deduped_sinks.append(s.model_dump(mode="json"))
+            if len(deduped_sinks) >= 30:
+                break
+
+        # Build route-to-sink correlation map
+        sinks_by_file: dict[str, list] = {}
+        for s in xref.sink_flows:
+            sinks_by_file.setdefault(s.file_path, []).append(s)
+
+        # Score routes: routes with nearby sinks are more interesting
+        def route_score(r: object) -> int:
+            score = 0
+            # Check for sinks in same file or source module
+            for check_file in (r.file_path, r.source_module):
+                if not check_file:
+                    continue
+                for ext in ("", ".ts", ".js", ".py"):
+                    for s in sinks_by_file.get(check_file + ext, []):
+                        score += SINK_DANGER_RANK.get(s.sink_type, 1)
+            return score
+
+        ranked_routes = sorted(xref.routes, key=route_score, reverse=True)
+
+        # Build correlated route entries for LLM
+        route_entries: list[dict] = []
+        for r in ranked_routes[:30]:
+            entry = r.model_dump(mode="json")
+            # Add correlated sinks inline
+            correlated = []
+            for check_file in (r.file_path, r.source_module):
+                if not check_file:
+                    continue
+                for ext in ("", ".ts", ".js", ".py"):
+                    for s in sinks_by_file.get(check_file + ext, []):
+                        correlated.append(f"{s.sink_type}: {s.sink} at {s.file_path}:{s.line_number}")
+            if correlated:
+                entry["correlated_sinks"] = correlated[:5]
+            route_entries.append(entry)
+
+        auth = xref.auth_patterns[:15]
+
+        if not route_entries and not deduped_sinks and not auth:
             return None
 
         return {
-            "routes": routes,
-            "sinks": sinks,
+            "routes": route_entries,
+            "sinks": deduped_sinks,
             "auth_patterns": auth,
             "languages": xref.languages_detected,
         }
