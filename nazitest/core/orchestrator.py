@@ -485,7 +485,11 @@ class Orchestrator:
                     if belief.is_ready_for_exploitation(h):
                         strategy = (
                             await exploit_planner.plan_structured(
-                                h_dict, []
+                                h_dict,
+                                [],
+                                target_url=(
+                                    self.config.scope.target_url
+                                ),
                             )
                         )
                         result = await engine.exploit(

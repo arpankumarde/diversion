@@ -7,6 +7,7 @@ import logging
 import re
 import uuid
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from nazitest.models.exploit import ExploitStrategy
 from nazitest.models.graph import Hypothesis
@@ -387,6 +388,7 @@ class ExploitPlanner(BaseAgent):
         self,
         hypothesis: dict,
         previous_attempts: list[dict] | None = None,
+        target_url: str = "",
     ) -> ExploitStrategy:
         """Plan an exploit and return a parsed ExploitStrategy.
 
@@ -394,6 +396,13 @@ class ExploitPlanner(BaseAgent):
         plan + regex parsing.
         """
         context = f"Vulnerability:\n{hypothesis}\n\n"
+        if target_url:
+            context += f"Target base URL: {target_url}\n\n"
+        context += (
+            "IMPORTANT: The 'url' field must be an absolute "
+            "URL starting with http:// or https://. "
+            "Do NOT return relative paths.\n\n"
+        )
         if previous_attempts:
             sanitized_attempts = self._sanitize(previous_attempts)
             context += (
@@ -417,7 +426,9 @@ class ExploitPlanner(BaseAgent):
                 context,
                 structured_output=self.STRATEGY_SCHEMA,
             )
-            return self._parse_strategy(raw, hypothesis_id)
+            return self._parse_strategy(
+                raw, hypothesis_id, hypothesis, target_url
+            )
         except Exception as e:
             logger.warning(
                 "Structured exploit plan failed (%s), "
@@ -428,13 +439,29 @@ class ExploitPlanner(BaseAgent):
         # Fallback: text plan + regex extraction
         text = await self.plan(hypothesis, previous_attempts)
         return self._parse_strategy_from_text(
-            text, hypothesis_id, hypothesis
+            text, hypothesis_id, hypothesis, target_url
         )
 
     @staticmethod
-    def _clean_url(url: str) -> str:
-        """Strip trailing junk from LLM-generated URLs."""
-        return url.rstrip("`\"'>,;) ")
+    def _resolve_url(
+        url: str,
+        target_url: str = "",
+        endpoint: str = "",
+    ) -> str:
+        """Clean and resolve a URL from LLM output.
+
+        Strips trailing junk, resolves relative paths against
+        target_url, falls back to endpoint if empty.
+        """
+        url = url.strip().rstrip("`\"'>,;) ")
+        if not url and endpoint:
+            url = endpoint.strip().rstrip("`\"'>,;) ")
+        if not url:
+            return target_url
+        parsed = urlparse(url)
+        if not parsed.scheme and target_url:
+            url = urljoin(target_url, url)
+        return url
 
     @staticmethod
     def _extract_json(text: str) -> dict | None:
@@ -472,19 +499,27 @@ class ExploitPlanner(BaseAgent):
 
     @staticmethod
     def _parse_strategy(
-        raw: str, hypothesis_id: str
+        raw: str,
+        hypothesis_id: str,
+        hypothesis: dict | None = None,
+        target_url: str = "",
     ) -> ExploitStrategy:
         """Parse JSON string into an ExploitStrategy."""
         data = ExploitPlanner._extract_json(raw)
         if data is None:
             raise ValueError("No valid JSON found in response")
+        endpoint = (
+            (hypothesis or {}).get("target_endpoint", "")
+        )
         return ExploitStrategy(
             hypothesis_id=hypothesis_id,
             http_method=HttpMethod(
                 data.get("http_method", "GET")
             ),
-            url=ExploitPlanner._clean_url(
-                data.get("url", "")
+            url=ExploitPlanner._resolve_url(
+                data.get("url", ""),
+                target_url,
+                endpoint,
             ),
             headers=data.get("headers", {}),
             body=data.get("body", ""),
@@ -498,24 +533,24 @@ class ExploitPlanner(BaseAgent):
         text: str,
         hypothesis_id: str,
         hypothesis: dict,
+        target_url: str = "",
     ) -> ExploitStrategy:
         """Best-effort extraction of strategy fields from text."""
+        endpoint = hypothesis.get("target_endpoint", "")
+
         # Try to find JSON in the text
         data = ExploitPlanner._extract_json(text)
-        if data and "url" in data:
+        if data and ("url" in data or "http_method" in data):
             try:
                 return ExploitStrategy(
                     hypothesis_id=hypothesis_id,
                     http_method=HttpMethod(
                         data.get("http_method", "GET")
                     ),
-                    url=ExploitPlanner._clean_url(
-                        data.get(
-                            "url",
-                            hypothesis.get(
-                                "target_endpoint", ""
-                            ),
-                        )
+                    url=ExploitPlanner._resolve_url(
+                        data.get("url", ""),
+                        target_url,
+                        endpoint,
                     ),
                     headers=data.get("headers", {}),
                     body=data.get("body", ""),
@@ -538,7 +573,7 @@ class ExploitPlanner(BaseAgent):
         raw_url = (
             url_match.group(1)
             if url_match
-            else hypothesis.get("target_endpoint", "")
+            else ""
         )
 
         return ExploitStrategy(
@@ -548,7 +583,9 @@ class ExploitPlanner(BaseAgent):
                 if method_match
                 else HttpMethod.GET
             ),
-            url=ExploitPlanner._clean_url(raw_url),
+            url=ExploitPlanner._resolve_url(
+                raw_url, target_url, endpoint
+            ),
             payload=(
                 payload_match.group(1)
                 if payload_match

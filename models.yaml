@@ -15,7 +15,7 @@ models:
     description: "Strongest reasoning for hypothesis generation"
 
   scout:
-    id: "anthropic/claude-haiku-4.5"
+    id: "anthropic/claude-sonnet-4.6"
     temperature: 0.3
     max_tokens: 4096
     description: "Fast exploratory analysis"
@@ -27,7 +27,7 @@ models:
     description: "Agentic coding for exploit generation"
 
   cross_validator:
-    id: "anthropic/claude-haiku-4.5"
+    id: "anthropic/claude-sonnet-4.6"
     temperature: 0.3
     max_tokens: 4096
     description: "Independent cross-validation"
