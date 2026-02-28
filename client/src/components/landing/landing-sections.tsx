@@ -51,19 +51,9 @@ export function LandingNav() {
             <span className="text-slate-500 text-sm">...</span>
           ) : user ? (
             <>
-              <span className="hidden sm:inline text-slate-400 text-sm truncate max-w-[120px]">
-                {user.name ?? user.email}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                asChild
-                className="rounded-md bg-teal-500/10 text-teal-400 border-teal-500/20 hover:bg-teal-500/20 hover:border-teal-500/40 hover:text-teal-300"
-              >
-                <a href="/auth/logout">
-                  <LogOut className="w-4 h-4 sm:mr-1" />
-                  <span className="hidden sm:inline">Logout</span>
-                </a>
+
+              <Button asChild className="rounded-md bg-teal-500 text-slate-950 hover:bg-teal-400 font-bold ml-2 transition-transform hover:scale-105">
+                <a href="/dashboard">Dashboard</a>
               </Button>
             </>
           ) : (
@@ -87,41 +77,84 @@ export function LandingNav() {
 
 export function HeroSection() {
   return (
-    <section className="py-32 flex flex-col items-center justify-center text-center space-y-8 min-h-[90vh]">
-      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-500/10 border border-teal-500/20 text-teal-400 text-xs font-mono mb-4">
-        <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" />
-        VERSION 1.0 - CONFIDENTIAL
-      </div>
+    <section className="relative pt-12 pb-16 min-h-[75vh] flex items-center">
+      {/* Background radial glow */}
+      <div className="absolute top-1/2 left-0 -translate-y-1/2 w-[600px] h-[600px] bg-teal-500/10 blur-[150px] rounded-full pointer-events-none" />
 
-      <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight text-white max-w-4xl leading-tight">
-        Autonomous Web Application <br />
-        <span className="text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-emerald-500">
-          Penetration Testing
-        </span>
-      </h1>
+      <div className="relative z-10 w-full grid lg:grid-cols-2 gap-16 items-center animate-in fade-in slide-in-from-bottom-8 duration-1000">
 
-      <p className={cn(subtextCls, "max-w-2xl leading-relaxed")}>
-        Combining real-time browser-based reconnaissance with LLM-driven
-        vulnerability reasoning and autonomous exploitation. The force
-        multiplier for modern security teams.
-      </p>
+        {/* Left Column: Text & CTA */}
+        <div className="flex flex-col items-start text-left space-y-8">
+          {/* Sleek Pill Badge */}
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.08] text-slate-300 text-xs font-medium backdrop-blur-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse shadow-[0_0_8px_1px_rgba(45,212,191,0.5)]" />
+            NAZITEST v1.0 Preview
+          </div>
 
-      <div className="flex flex-col sm:flex-row items-center gap-4 pt-8">
-        <Button
-          size="lg"
-          className="rounded-lg bg-teal-500 text-slate-950 font-bold hover:bg-teal-400 shadow-[0_0_20px_-5px_rgba(20,184,166,0.4)] gap-2"
-        >
-          <Terminal className="w-5 h-5" />
-          Initialize Run
-        </Button>
-        <Button
-          variant="outline"
-          size="lg"
-          className="rounded-lg bg-white/5 text-white border-white/10 hover:bg-white/10 gap-2"
-        >
-          View Architecture
-          <ChevronRight className="w-4 h-4" />
-        </Button>
+          {/* Premium Typography Heading */}
+          <h1 className="text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-b from-white to-white/70 leading-[1.1]">
+            The standard for <br />
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-emerald-400">
+              Autonomous Pentesting
+            </span>
+          </h1>
+
+          {/* Refined Subtext */}
+          <p className="max-w-xl leading-relaxed text-slate-400 text-lg md:text-xl font-normal">
+            Combining deep browser reconnaissance with multi-agent reasoning.
+            The ultimate force multiplier for sophisticated security teams.
+          </p>
+
+          {/* Elevated Buttons */}
+          <div className="flex flex-col sm:flex-row items-center gap-4 pt-4 w-full sm:w-auto">
+            <Button
+              size="lg"
+              className="w-full sm:w-auto h-12 px-8 rounded-full bg-white text-slate-950 font-semibold text-base hover:bg-slate-200 transition-colors shadow-lg shadow-white/5 gap-2"
+            >
+              <Terminal className="w-4 h-4" />
+              Initialize Platform
+            </Button>
+            <Button
+              variant="outline"
+              size="lg"
+              className="w-full sm:w-auto h-12 px-8 rounded-full bg-white/[0.03] text-slate-200 border-white/10 hover:bg-white/[0.08] hover:border-white/20 transition-all gap-2 text-base font-medium backdrop-blur-sm"
+            >
+              View Architecture
+              <ChevronRight className="w-4 h-4 text-slate-400" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Right Column: Terminal Mockup */}
+        <div className="hidden lg:block relative perspective-1000">
+          <div className="relative w-full aspect-square max-h-[500px] bg-[#0c0c0c]/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden p-6 flex flex-col font-mono text-sm leading-relaxed transform rotate-y-[-10deg] rotate-x-[5deg] transition-transform hover:rotate-y-0 hover:rotate-x-0 duration-700">
+            {/* Window Controls */}
+            <div className="flex items-center gap-2 mb-6">
+              <div className="w-3 h-3 rounded-full bg-slate-700/50" />
+              <div className="w-3 h-3 rounded-full bg-slate-700/50" />
+              <div className="w-3 h-3 rounded-full bg-slate-700/50" />
+            </div>
+
+            {/* Terminal Output */}
+            <div className="flex-1 space-y-3 opacity-90">
+              <div className="flex text-slate-500">
+                <span className="text-teal-500 mr-2">❯</span> nazi-cli init --target api.production.com
+              </div>
+              <div className="text-slate-400">[08:24:12] Authenticating via stored CDP session...</div>
+              <div className="text-teal-400">[08:24:14] Success. DOM context established.</div>
+              <div className="text-slate-400">[08:24:16] Mapping routes and GraphQL endpoints...</div>
+              <div className="text-slate-400">[08:24:19] Discovered 42 endpoints. Extracting fragments...</div>
+              <div className="text-emerald-400">[08:24:22] LLM Agent evaluating mutation vectors...</div>
+              <div className="flex items-center gap-2 mt-4 text-slate-500">
+                <span className="w-1.5 h-4 bg-teal-500 animate-pulse" />
+                Processing hypothesis tree
+              </div>
+            </div>
+            {/* Deep glow under terminal */}
+            <div className="absolute -bottom-20 -right-20 w-64 h-64 bg-emerald-500/20 blur-[100px] rounded-full pointer-events-none" />
+          </div>
+        </div>
+
       </div>
     </section>
   );

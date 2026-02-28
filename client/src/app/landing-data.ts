@@ -29,15 +29,21 @@ export const workflowSteps: ReadonlyArray<{
   title: string;
   desc: string;
 }> = [
-  { icon: Lock, title: "Authorize", desc: "Confirm scope & legal boundaries" },
-  { icon: Eye, title: "Recon", desc: "CDP-driven browser crawling" },
-  { icon: Server, title: "Record", desc: "Capture HAR, DOM & JSON" },
-  { icon: Network, title: "Model", desc: "Build knowledge graph" },
-  { icon: BrainCircuit, title: "Reason", desc: "LLM vulnerability hypotheses" },
-  { icon: Target, title: "Exploit", desc: "curl_cffi & browser replay" },
-];
+    { icon: Lock, title: "Authorize", desc: "Confirm scope & legal boundaries" },
+    { icon: Eye, title: "Recon", desc: "CDP-driven browser crawling" },
+    { icon: Server, title: "Record", desc: "Capture HAR, DOM & JSON" },
+    { icon: Network, title: "Model", desc: "Build knowledge graph" },
+    { icon: BrainCircuit, title: "Reason", desc: "LLM vulnerability hypotheses" },
+    { icon: Target, title: "Exploit", desc: "curl_cffi & browser replay" },
+  ];
 
-export const coreModules = [
+export const coreModules: Array<{
+  icon: any;
+  title: string;
+  description: string;
+  iconClass: string;
+  wide?: boolean;
+}> = [
   {
     icon: Eye,
     title: "Zendriver Recon Engine",
@@ -74,7 +80,7 @@ export const coreModules = [
       "Every request, response, DOM mutation, and WebSocket frame is captured as structured HAR + JSON. Nothing is lost.",
     iconClass: "bg-teal-500/10 border-teal-500/20 text-teal-400",
   },
-] as const;
+] as any;
 
 export const comparisonRows = [
   {

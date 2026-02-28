@@ -155,9 +155,6 @@ export default function SettingsPage() {
         {PURPOSES.map((purpose) => {
           const modelId = modelByPurpose[purpose.key];
           const model = MODELS.find((m) => m.id === modelId);
-          const provider = model?.provider ?? "anthropic";
-          const logoUrl = PROVIDER_LOGOS[provider];
-
           return (
             <Card key={purpose.key}>
               <CardHeader>
@@ -180,17 +177,7 @@ export default function SettingsPage() {
                       id={`model-${purpose.key}`}
                       className="w-full"
                     >
-                      <span className="flex items-center gap-2">
-                        <Image
-                          src={logoUrl}
-                          alt=""
-                          width={16}
-                          height={16}
-                          className="shrink-0"
-                          unoptimized
-                        />
-                        <SelectValue placeholder="Select a model" />
-                      </span>
+                      <SelectValue placeholder="Select a model" />
                     </SelectTrigger>
                     <SelectContent>
                       {MODELS.map((m) => (
@@ -201,7 +188,7 @@ export default function SettingsPage() {
                               alt=""
                               width={16}
                               height={16}
-                              className="shrink-0"
+                              className="shrink-0 dark:invert"
                               unoptimized
                             />
                             {m.name}

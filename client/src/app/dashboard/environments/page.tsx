@@ -30,9 +30,24 @@ import {
 import { PlusIcon, ExternalLinkIcon } from "lucide-react";
 
 const ENVIRONMENT_TAGS = [
-  { value: "DEVELOPMENT", label: "Development" },
-  { value: "STAGING", label: "Staging" },
-  { value: "PRODUCTION", label: "Production" },
+  {
+    value: "DEVELOPMENT",
+    label: "Development",
+    color: "bg-sky-400",
+    theme: "bg-sky-400/10 text-sky-400 border-sky-400/20"
+  },
+  {
+    value: "STAGING",
+    label: "Staging",
+    color: "bg-amber-500",
+    theme: "bg-amber-500/10 text-amber-500 border-amber-500/20"
+  },
+  {
+    value: "PRODUCTION",
+    label: "Production",
+    color: "bg-emerald-500",
+    theme: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
+  },
 ] as const;
 
 type EnvironmentTag = (typeof ENVIRONMENT_TAGS)[number]["value"];
@@ -101,6 +116,14 @@ export default function EnvironmentsPage() {
 
   const handleAddEnvironment = () => {
     if (!formName.trim() || !formEndpoint.trim()) return;
+
+    // URL Validation
+    try {
+      new URL(formEndpoint.trim());
+    } catch (e) {
+      return;
+    }
+
     const newEnv: Environment = {
       id: crypto.randomUUID(),
       name: formName.trim(),
@@ -168,7 +191,10 @@ export default function EnvironmentsPage() {
                   <SelectContent>
                     {ENVIRONMENT_TAGS.map((t) => (
                       <SelectItem key={t.value} value={t.value}>
-                        {t.label}
+                        <div className="flex items-center gap-2 w-32">
+                          <div className={`h-2 w-2 rounded-full ${t.color}`} />
+                          {t.label}
+                        </div>
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -198,11 +224,24 @@ export default function EnvironmentsPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {environments.map((env) => (
-          <Card key={env.id}>
+          <Card key={env.id} className="bg-muted/30 border-sidebar-border/50 hover:bg-muted/50 hover:border-sidebar-ring/50 transition-colors shadow-sm">
             <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
               <div className="space-y-1">
                 <CardTitle className="text-base">{env.name}</CardTitle>
-                <Badge variant={getTagVariant(env.tag)}>{env.tag}</Badge>
+                <div className="flex items-center gap-2">
+                  {(() => {
+                    const tagInfo = ENVIRONMENT_TAGS.find((t) => t.value === env.tag);
+                    return (
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] uppercase tracking-wider h-5 gap-1.5 px-2 font-semibold border-none ${tagInfo?.theme}`}
+                      >
+                        <div className={`h-1.5 w-1.5 rounded-full shrink-0 ${tagInfo?.color}`} />
+                        {env.tag}
+                      </Badge>
+                    );
+                  })()}
+                </div>
               </div>
             </CardHeader>
             <CardContent>

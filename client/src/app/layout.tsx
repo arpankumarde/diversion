@@ -30,7 +30,12 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const session = await auth0.getSession();
+  let session = null;
+  // try {
+  //   session = await auth0.getSession();
+  // } catch (error) {
+  //   console.log(error);
+  // }
   // console.log(session);
 
   return (
