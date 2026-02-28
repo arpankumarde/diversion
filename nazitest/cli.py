@@ -66,11 +66,12 @@ def scan(
     # Auto-derive scope: domain + all subdomains
     parsed = urlparse(target)
     hostname = parsed.hostname or ""
+    scope_display = parsed.netloc or hostname  # netloc includes port
 
     console.print(
         Panel(
             f"[bold]Target:[/bold] {target}\n"
-            f"[bold]Scope:[/bold] {hostname} (+ subdomains)\n"
+            f"[bold]Scope:[/bold] {scope_display} (+ subdomains)\n"
             f"[bold]Depth:[/bold] {depth} | [bold]Pages:[/bold] {pages}\n"
             f"[bold]Time limit:[/bold] {time_limit} min",
             title="NAZITEST Scan",

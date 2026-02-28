@@ -10,6 +10,7 @@ from typing import Any, Callable, Coroutine
 import zendriver as zd
 from zendriver.cdp import network as cdp_network
 from zendriver.cdp import page as cdp_page
+from zendriver.cdp.network import Cookie as CdpCookie
 
 from nazitest.recon.har_recorder import HARRecorder
 
@@ -97,15 +98,38 @@ class BrowserController:
         return await self.page.evaluate(expression)
 
     async def get_cookies(self) -> list[dict[str, Any]]:
-        """Get all cookies for the current page."""
-        return await self.page.evaluate(
-            """() => {
-                return document.cookie.split(';').map(c => {
-                    const [name, ...rest] = c.trim().split('=');
-                    return {name: name, value: rest.join('=')};
-                }).filter(c => c.name);
-            }"""
-        )
+        """Get ALL cookies via CDP (including HttpOnly)."""
+        try:
+            cdp_cookies: list[CdpCookie] = await self.page.send(
+                cdp_network.get_all_cookies()
+            )
+            result = []
+            for c in cdp_cookies:
+                result.append({
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": c.domain,
+                    "path": c.path,
+                    "expires": c.expires if c.expires else -1,
+                    "size": c.size,
+                    "httpOnly": c.http_only,
+                    "secure": c.secure,
+                    "session": c.session,
+                    "sameSite": str(c.same_site) if c.same_site else "",
+                })
+            logger.info("CDP get_all_cookies: %d cookies", len(result))
+            return result
+        except Exception as e:
+            logger.warning("CDP cookie fetch failed, falling back to JS: %s", e)
+            # Fallback to JS (won't get HttpOnly but better than nothing)
+            return await self.page.evaluate(
+                """() => {
+                    return document.cookie.split(';').map(c => {
+                        const [name, ...rest] = c.trim().split('=');
+                        return {name: name, value: rest.join('=')};
+                    }).filter(c => c.name);
+                }"""
+            )
 
     async def get_local_storage(self) -> dict[str, str]:
         """Extract localStorage contents."""

@@ -17,6 +17,10 @@ class ScopeEnforcer:
         self._target_parts = tldextract.extract(config.target_url)
         self._allowed_domains = set(config.allowed_domains)
 
+        # Extract target port for scope enforcement
+        target_parsed = urlparse(config.target_url)
+        self._target_port = target_parsed.port  # None for default ports
+
         # If no explicit domains, auto-detect from target URL
         if not self._allowed_domains:
             domain = f"{self._target_parts.domain}.{self._target_parts.suffix}"
@@ -40,6 +44,16 @@ class ScopeEnforcer:
         # Check domain
         if not self._is_domain_allowed(hostname):
             return False
+
+        # Check port — if target uses a non-standard port, URLs must match it
+        if self._target_port is not None:
+            url_port = parsed.port
+            # Default ports (80/443) are None, so only enforce when target has explicit port
+            if url_port is not None and url_port != self._target_port:
+                return False
+            # If URL has no explicit port but target does, it's a different service
+            if url_port is None:
+                return False
 
         # Check path exclusions
         path = parsed.path or "/"

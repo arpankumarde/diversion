@@ -19,9 +19,8 @@ from nazitest.exploitation.curl_exploit import CurlExploiter
 from nazitest.exploitation.engine import ExploitationEngine
 from nazitest.models.config import RunConfig
 from nazitest.models.exploit import ExploitResult
-from nazitest.models.types import ArtifactType, OrchestratorPhase
+from nazitest.models.types import ArtifactType, HttpMethod, OrchestratorPhase
 from nazitest.proxy.manager import ProxyManager
-from nazitest.reasoning.belief import BeliefRefinementLoop
 from nazitest.recon.browser import BrowserController
 from nazitest.recon.dom_snapshot import DOMSnapshotCapture
 from nazitest.recon.har_recorder import HARRecorder
@@ -222,10 +221,19 @@ class Orchestrator:
             # Save cookie jar
             try:
                 cookies = await browser.get_cookies()
+                logger.info("Cookies captured: %d", len(cookies) if cookies else 0)
                 if cookies:
                     self.store.save(ArtifactType.COOKIE_JAR, {"cookies": cookies})
-            except Exception:
-                pass
+                    console.print(f"  [green]Saved {len(cookies)} cookies[/green]")
+                    for c in cookies:
+                        name = c.get("name", "?")
+                        httponly = c.get("httpOnly", False)
+                        logger.info("  Cookie: %s (httpOnly=%s)", name, httponly)
+                else:
+                    console.print("  [yellow]No cookies captured[/yellow]")
+            except Exception as e:
+                logger.error("Cookie capture failed: %s", e)
+                console.print(f"  [red]Cookie capture failed: {e}[/red]")
 
             console.print(
                 f"[green]Manual crawl complete:[/green] {len(pages_captured)} pages, "
@@ -384,21 +392,26 @@ class Orchestrator:
             await client.close()
 
     async def _exploit(self) -> None:
-        """Fully offensive exploitation pipeline.
+        """Agentic exploitation — LLM-driven feedback loop.
 
         For each hypothesis:
-        1. Scout investigation (aggressive)
-        2. Skip CV — go straight to exploitation
-        3. LLM-planned strategy first
-        4. If fails: try common payload mutations
-        5. If still fails: re-plan with failure context
+        1. Get baseline response (benign value)
+        2. LLM generates 3-5 targeted payloads
+        3. Send payloads, collect response behavior
+        4. Pattern-match for obvious signals (fast-path)
+        5. Show results to LLM → verdict: confirmed/not/retry
+        6. If retry: LLM adapts, generates new payloads
+        7. Max 3 rounds per hypothesis
+
+        No hardcoded payloads. No confidence scores.
+        Binary outcome: confirmed=True or confirmed=False.
         """
         assert self.store is not None
+        max_rounds = 3
 
         if not self.settings.openrouter_api_key:
             console.print(
-                "[yellow]No OpenRouter API key. "
-                "Skipping exploitation.[/yellow]"
+                "[yellow]No API key. Skipping exploit.[/yellow]"
             )
             return
 
@@ -409,30 +422,49 @@ class Orchestrator:
             )
             return
 
-        # Load cookies from manual browse phase
+        # Load cookies from manual browse
         cookies: dict[str, str] = {}
         try:
             cookie_files = self.store.list_artifacts(
                 ArtifactType.COOKIE_JAR
             )
+            logger.info(
+                "Cookie files found: %s", cookie_files
+            )
             if cookie_files:
-                cookie_data = self.store.load(
+                cdata = self.store.load(
                     ArtifactType.COOKIE_JAR, cookie_files[-1]
                 )
-                for c in cookie_data.get("cookies", []):
+                for c in cdata.get("cookies", []):
                     if (
                         isinstance(c, dict)
                         and "name" in c
                         and "value" in c
                     ):
                         cookies[c["name"]] = c["value"]
+                logger.info(
+                    "Loaded %d cookies: %s",
+                    len(cookies),
+                    list(cookies.keys()),
+                )
+                console.print(
+                    f"  [green]Loaded {len(cookies)} cookies: "
+                    f"{', '.join(cookies.keys())}[/green]"
+                )
+            else:
+                logger.warning("No cookie files found")
+                console.print(
+                    "  [yellow]No cookies found — "
+                    "exploits may fail on auth-required "
+                    "targets[/yellow]"
+                )
         except Exception as e:
             logger.warning("Could not load cookies: %s", e)
+            console.print(
+                f"  [yellow]Cookie load error: {e}[/yellow]"
+            )
 
-        from nazitest.reasoning.agents import (
-            ExploitPlanner,
-            Scout,
-        )
+        from nazitest.reasoning.agents import ExploitPlanner
         from nazitest.reasoning.openrouter import (
             OpenRouterClient,
         )
@@ -442,7 +474,8 @@ class Orchestrator:
             models=self.settings.models.models,
             base_url=self.settings.openrouter_base_url,
             budget_limit=(
-                self.settings.models.budget.max_cost_per_run_usd
+                self.settings.models.budget
+                .max_cost_per_run_usd
             ),
             warn_at=self.settings.models.budget.warn_at_usd,
         )
@@ -451,23 +484,21 @@ class Orchestrator:
         curl_exploiter = CurlExploiter(proxy_url=proxy_url)
         engine = ExploitationEngine(
             curl_exploiter=curl_exploiter,
-            max_attempts=8,
+            max_attempts=3,
         )
 
-        belief = BeliefRefinementLoop()
-        scout = Scout(client)
-        exploit_planner = ExploitPlanner(client)
+        planner = ExploitPlanner(client)
         target_url = self.config.scope.target_url
 
-        sorted_hypotheses = sorted(
+        sorted_hyps = sorted(
             hypotheses,
             key=lambda h: h.confidence,
             reverse=True,
         )
-        total = len(sorted_hypotheses)
+        total = len(sorted_hyps)
 
         try:
-            for idx, h in enumerate(sorted_hypotheses, 1):
+            for idx, h in enumerate(sorted_hyps, 1):
                 if not self._check_time_limit():
                     console.print(
                         "[yellow]Time limit reached.[/yellow]"
@@ -476,186 +507,172 @@ class Orchestrator:
 
                 console.print(
                     f"\n[bold][{idx}/{total}] "
-                    f"{h.title}[/bold]"
+                    f"{h.title}[/bold] "
+                    f"({h.vuln_type})"
                 )
                 h_dict = h.model_dump(mode="json")
-                graph_evidence = (
-                    self.knowledge_graph.to_snapshot()
-                    .model_dump(mode="json")
-                )
 
                 try:
-                    # ── Scout investigation ──
-                    scout_response = await scout.investigate(
-                        h_dict, graph_evidence
+                    # ── Baseline ──
+                    template = ExploitPlanner.build_strategy(
+                        h_dict, "1", target_url, HttpMethod.GET,
                     )
-                    scout_conf = (
-                        BeliefRefinementLoop
-                        .parse_confidence_from_llm(
-                            scout_response
+                    baseline = await engine.get_baseline(
+                        template, cookies or None,
+                    )
+                    baseline_info = (
+                        ExploitPlanner.format_baseline_info(
+                            baseline
                         )
                     )
-                    if scout_conf is None:
-                        scout_conf = max(h.confidence, 0.7)
-                    evidence_str = min(scout_conf, 0.8)
-                    updated = belief.update_belief(
-                        h, scout_conf, evidence_str
-                    )
                     console.print(
-                        f"  Scout: {scout_conf:.2f} "
-                        f"→ belief: {updated:.2f}"
+                        f"  Baseline: {baseline_info}"
                     )
 
-                    # ── Skip CV — go straight to exploit ──
-                    # Offensive mode: if scout says > 0.4,
-                    # we try it. Real pentesters try things.
-                    if h.confidence < 0.4:
-                        console.print(
-                            f"  Skipped (belief "
-                            f"{h.confidence:.2f} < 0.4)"
-                        )
-                        self.knowledge_graph.add_hypothesis(h)
-                        continue
-
-                    # ── Phase 1: LLM-planned exploit ──
-                    console.print(
-                        "  [blue]Phase 1: LLM strategy[/blue]"
-                    )
                     confirmed = False
-                    prev_attempts: list[dict] = []
+                    evidence = ""
+                    # (payload, method_str, ExploitResult)
+                    all_attempts: list[
+                        tuple[str, str, ExploitResult]
+                    ] = []
 
-                    try:
-                        strategy = (
-                            await exploit_planner
-                            .plan_structured(
-                                h_dict,
-                                [],
-                                target_url=target_url,
-                            )
-                        )
-                        result = await engine.exploit(
-                            strategy,
-                            cookies or None,
-                            vuln_type=h.vuln_type,
-                        )
-                        self.exploit_results.append(result)
+                    payloads: list[str] = []
 
-                        if result.confirmed:
-                            confirmed = True
-                            self._log_confirmed(
-                                h, strategy, result
-                            )
-                        else:
-                            self._log_attempt(
-                                strategy, result
-                            )
-                            prev_attempts = [
-                                a.model_dump(mode="json")
-                                for a in result.attempts
-                            ]
-                    except Exception as e:
-                        logger.warning(
-                            "LLM strategy failed: %s", e
-                        )
-                        console.print(
-                            f"  LLM strategy error: {e}"
-                        )
+                    for round_num in range(max_rounds):
+                        if confirmed:
+                            break
+                        if not self._check_time_limit():
+                            break
 
-                    # ── Phase 2: Common payload mutations ──
-                    if not confirmed:
-                        console.print(
-                            "  [blue]Phase 2: "
-                            "Payload mutations[/blue]"
-                        )
-                        payload_strategies = (
-                            exploit_planner
-                            .build_payload_strategies(
-                                h_dict,
-                                target_url=target_url,
+                        # ── Generate payloads ──
+                        if round_num == 0:
+                            payloads = (
+                                await planner
+                                .generate_payloads(
+                                    h_dict, baseline_info,
+                                )
                             )
-                        )
-                        tested = 0
-                        for ps in payload_strategies:
-                            if not self._check_time_limit():
-                                break
+                            console.print(
+                                f"  Round 1: "
+                                f"{len(payloads)} payloads"
+                            )
+                            for p in payloads:
+                                console.print(
+                                    f"    → {p[:70]}"
+                                )
+
+                        if not payloads:
+                            console.print(
+                                "  No payloads generated"
+                            )
+                            break
+
+                        # ── Send payloads ──
+                        for payload in payloads:
                             if confirmed:
                                 break
-                            tested += 1
-                            try:
-                                result = await engine.exploit(
-                                    ps,
-                                    cookies or None,
-                                    vuln_type=h.vuln_type,
-                                )
-                                self.exploit_results.append(
-                                    result
-                                )
-                                if result.confirmed:
-                                    confirmed = True
-                                    self._log_confirmed(
-                                        h, ps, result
-                                    )
+                            for method in (
+                                HttpMethod.GET,
+                                HttpMethod.POST,
+                            ):
+                                if confirmed:
                                     break
-                            except Exception as e:
-                                logger.warning(
-                                    "Payload %s failed: %s",
-                                    ps.payload[:30],
-                                    e,
+                                s = (
+                                    ExploitPlanner
+                                    .build_strategy(
+                                        h_dict,
+                                        payload,
+                                        target_url,
+                                        method,
+                                    )
                                 )
-                        if not confirmed and tested > 0:
-                            console.print(
-                                f"  Tried {tested} payloads, "
-                                f"none confirmed"
-                            )
+                                r = (
+                                    await engine.single_shot(
+                                        s,
+                                        cookies or None,
+                                        vuln_type=(
+                                            h.vuln_type
+                                        ),
+                                        baseline=baseline,
+                                    )
+                                )
+                                all_attempts.append((
+                                    payload,
+                                    method.value,
+                                    r,
+                                ))
+                                self.exploit_results.append(r)
 
-                    # ── Phase 3: Re-plan with failure context ──
-                    if not confirmed and prev_attempts:
-                        console.print(
-                            "  [blue]Phase 3: "
-                            "Adaptive re-plan[/blue]"
+                                # Fast-path: pattern match
+                                if r.confirmed:
+                                    confirmed = True
+                                    evidence = (
+                                        r.evidence_summary
+                                    )
+                                    self._log_confirmed(
+                                        h, s, r,
+                                    )
+
+                        if confirmed:
+                            break
+
+                        # ── LLM judges results ──
+                        results_summary = (
+                            ExploitPlanner
+                            .format_results_summary(
+                                all_attempts, baseline,
+                            )
                         )
-                        try:
-                            strategy = (
-                                await exploit_planner
-                                .plan_structured(
-                                    h_dict,
-                                    prev_attempts[:3],
-                                    target_url=target_url,
-                                )
+                        judgment = (
+                            await planner.judge_results(
+                                h_dict,
+                                results_summary,
+                                baseline_info,
                             )
-                            result = await engine.exploit(
-                                strategy,
-                                cookies or None,
-                                vuln_type=h.vuln_type,
-                            )
-                            self.exploit_results.append(result)
-                            if result.confirmed:
-                                confirmed = True
-                                self._log_confirmed(
-                                    h, strategy, result
-                                )
-                            else:
-                                self._log_attempt(
-                                    strategy, result
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                "Re-plan failed: %s", e
-                            )
+                        )
 
-                    # ── Update belief based on results ──
-                    any_blocked = any(
-                        any(a.blocked for a in r.attempts)
-                        for r in self.exploit_results
-                        if r.hypothesis_id == h.id
-                    )
-                    belief.apply_exploitation_result(
-                        h, confirmed, any_blocked
-                    )
+                        verdict = judgment["verdict"]
+                        console.print(
+                            f"  LLM verdict: {verdict}"
+                        )
 
+                        if verdict == "confirmed":
+                            confirmed = True
+                            evidence = judgment["evidence"]
+                            console.print(
+                                f"  [bold green]LLM "
+                                f"CONFIRMED[/bold green]: "
+                                f"{evidence[:200]}"
+                            )
+                        elif verdict == "not_vulnerable":
+                            console.print(
+                                f"  LLM: not vulnerable — "
+                                f"{judgment['evidence'][:100]}"
+                            )
+                            break
+                        else:
+                            # "continue" — new payloads
+                            payloads = judgment.get(
+                                "next_payloads", []
+                            )
+                            if not payloads:
+                                break
+                            console.print(
+                                f"  Round {round_num + 2}: "
+                                f"{len(payloads)} new "
+                                f"payloads"
+                            )
+                            for p in payloads:
+                                console.print(
+                                    f"    → {p[:70]}"
+                                )
+
+                    # ── Update hypothesis ──
+                    h.confirmed = confirmed
+                    h.exploitation_attempted = True
                     if confirmed:
-                        # Save PoC artifact
-                        poc_result = next(
+                        h.confidence = 1.0
+                        poc = next(
                             (
                                 r
                                 for r in self.exploit_results
@@ -664,30 +681,42 @@ class Orchestrator:
                             ),
                             None,
                         )
-                        if poc_result:
+                        if poc:
                             self.store.save(
                                 ArtifactType.POC,
                                 {
                                     "hypothesis_id": h.id,
                                     "title": h.title,
                                     "poc_script": (
-                                        poc_result.poc_script
+                                        poc.poc_script
                                     ),
                                     "evidence": (
-                                        poc_result
-                                        .evidence_summary
+                                        poc.evidence_summary
+                                        or evidence
                                     ),
+                                },
+                                name=h.id,
+                            )
+                        # Also mark confirmed for LLM-only
+                        # confirmations (no pattern match)
+                        if not poc and evidence:
+                            self.store.save(
+                                ArtifactType.POC,
+                                {
+                                    "hypothesis_id": h.id,
+                                    "title": h.title,
+                                    "poc_script": "",
+                                    "evidence": evidence,
                                 },
                                 name=h.id,
                             )
                     else:
                         console.print(
-                            f"  [yellow]Not confirmed[/yellow]"
-                            f" — confidence: "
-                            f"{h.confidence:.2f}"
+                            "  [yellow]Not confirmed"
+                            "[/yellow]"
                         )
 
-                    # Save all exploit attempts
+                    # Save exploit artifacts
                     h_results = [
                         r
                         for r in self.exploit_results
@@ -705,25 +734,23 @@ class Orchestrator:
                 except Exception as e:
                     logger.warning(
                         "Hypothesis %s failed: %s",
-                        h.id,
-                        e,
+                        h.id, e,
                     )
                     console.print(
                         f"  [red]Error: {e}[/red]"
                     )
                     continue
 
-            # Save final knowledge graph
+            # Save final graph
             self.store.save(
                 ArtifactType.KNOWLEDGE_GRAPH,
                 self.knowledge_graph.to_snapshot(),
             )
 
-            # Accumulate usage for meta.json
+            # Accumulate usage
             from nazitest.reasoning.openrouter import (
                 UsageTracker,
             )
-
             if self._usage_tracker is None:
                 self._usage_tracker = UsageTracker()
             self._usage_tracker.merge(client.usage)
@@ -735,7 +762,7 @@ class Orchestrator:
                 "llm_calls"
             ] = len(client.usage.calls)
 
-            # Capture network stats
+            # Network stats
             total_attempts = sum(
                 len(r.attempts)
                 for r in self.exploit_results
@@ -748,67 +775,44 @@ class Orchestrator:
                 1 for r in self.exploit_results
                 if r.confirmed
             )
-            tested_hyps = len(
-                set(
-                    r.hypothesis_id
-                    for r in self.exploit_results
-                )
-            )
+            tested_hyps = len(set(
+                r.hypothesis_id
+                for r in self.exploit_results
+            ))
             self._network_stats = {
                 "exploit_requests_sent": total_attempts,
                 "exploit_requests_blocked": blocked_attempts,
                 "hypotheses_tested": tested_hyps,
                 "hypotheses_confirmed": confirmed_count,
-                "total_exploit_results": len(
-                    self.exploit_results
-                ),
             }
 
             console.print(
                 f"\n[green]Exploitation complete.[/green] "
                 f"{tested_hyps} tested, "
-                f"{total_attempts} requests sent, "
+                f"{total_attempts} requests, "
                 f"{confirmed_count} confirmed."
             )
         except Exception as e:
-            logger.warning(
-                "Exploitation phase failed: %s", e
-            )
+            logger.warning("Exploit phase failed: %s", e)
             console.print(
-                f"[yellow]Exploitation error: {e}[/yellow]"
+                f"[yellow]Exploit error: {e}[/yellow]"
             )
         finally:
             await client.close()
 
+    @staticmethod
     def _log_confirmed(
-        self,
-        h: Any,
-        strategy: Any,
-        result: ExploitResult,
+        h: Any, strategy: Any, result: ExploitResult
     ) -> None:
-        """Log a confirmed exploit."""
         console.print(
             f"  [bold green]CONFIRMED[/bold green] "
             f"{strategy.http_method.value} {strategy.url}"
         )
         if result.evidence_summary:
             console.print(
-                f"  Evidence: {result.evidence_summary[:200]}"
+                f"  Evidence: "
+                f"{result.evidence_summary[:200]}"
             )
-
-    def _log_attempt(
-        self,
-        strategy: Any,
-        result: ExploitResult,
-    ) -> None:
-        """Log a failed exploit attempt."""
-        status = "BLOCKED" if any(
-            a.blocked for a in result.attempts
-        ) else "not confirmed"
-        console.print(
-            f"  {strategy.http_method.value} "
-            f"{strategy.url} → {status}"
-        )
 
     def _generate_report(self) -> None:
         """Generate the final report and meta.json."""

