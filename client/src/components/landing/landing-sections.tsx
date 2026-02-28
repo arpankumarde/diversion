@@ -1,0 +1,352 @@
+"use client";
+
+import {
+  ShieldAlert,
+  Terminal,
+  CheckCircle2,
+  ChevronRight,
+  Lock,
+  LogIn,
+  LogOut,
+} from "lucide-react";
+import { useUser } from "@auth0/nextjs-auth0/client";
+import { Button } from "@/components/ui/button";
+import {
+  navLinks,
+  thesisBullets,
+  workflowSteps,
+  coreModules,
+  comparisonRows,
+  codeSnippetLines,
+} from "@/app/landing-data";
+import { cn } from "@/lib/utils";
+
+const sectionCls = "py-24 border-t border-white/5";
+const headingCls = "text-3xl font-bold text-white mb-4";
+const subtextCls = "text-slate-400 text-lg";
+
+export function LandingNav() {
+  const { user, isLoading } = useUser();
+
+  return (
+    <nav className="sticky top-0 z-10 border-b border-white/5 bg-slate-950/50 backdrop-blur-md">
+      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-teal-400 font-mono font-bold tracking-wider text-xl">
+          <ShieldAlert className="w-6 h-6 text-teal-500" />
+          <span>NAZITEST</span>
+        </div>
+        <div className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
+          {navLinks.map((link) => (
+            <a
+              key={link.href}
+              href={link.href}
+              className="hover:text-teal-400 transition-colors"
+            >
+              {link.label}
+            </a>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          {isLoading ? (
+            <span className="text-slate-500 text-sm">...</span>
+          ) : user ? (
+            <>
+              <span className="hidden sm:inline text-slate-400 text-sm truncate max-w-[120px]">
+                {user.name ?? user.email}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                asChild
+                className="rounded-md bg-teal-500/10 text-teal-400 border-teal-500/20 hover:bg-teal-500/20 hover:border-teal-500/40 hover:text-teal-300"
+              >
+                <a href="/auth/logout">
+                  <LogOut className="w-4 h-4 sm:mr-1" />
+                  <span className="hidden sm:inline">Logout</span>
+                </a>
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              asChild
+              className="rounded-md bg-teal-500/10 text-teal-400 border-teal-500/20 hover:bg-teal-500/20 hover:border-teal-500/40 hover:text-teal-300"
+            >
+              <a href="/auth/login">
+                <LogIn className="w-4 h-4 sm:mr-1" />
+                <span className="hidden sm:inline">Login</span>
+              </a>
+            </Button>
+          )}
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+export function HeroSection() {
+  return (
+    <section className="py-32 flex flex-col items-center justify-center text-center space-y-8 min-h-[90vh]">
+      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-500/10 border border-teal-500/20 text-teal-400 text-xs font-mono mb-4">
+        <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" />
+        VERSION 1.0 - CONFIDENTIAL
+      </div>
+
+      <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight text-white max-w-4xl leading-tight">
+        Autonomous Web Application <br />
+        <span className="text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-emerald-500">
+          Penetration Testing
+        </span>
+      </h1>
+
+      <p className={cn(subtextCls, "max-w-2xl leading-relaxed")}>
+        Combining real-time browser-based reconnaissance with LLM-driven
+        vulnerability reasoning and autonomous exploitation. The force
+        multiplier for modern security teams.
+      </p>
+
+      <div className="flex flex-col sm:flex-row items-center gap-4 pt-8">
+        <Button
+          size="lg"
+          className="rounded-lg bg-teal-500 text-slate-950 font-bold hover:bg-teal-400 shadow-[0_0_20px_-5px_rgba(20,184,166,0.4)] gap-2"
+        >
+          <Terminal className="w-5 h-5" />
+          Initialize Run
+        </Button>
+        <Button
+          variant="outline"
+          size="lg"
+          className="rounded-lg bg-white/5 text-white border-white/10 hover:bg-white/10 gap-2"
+        >
+          View Architecture
+          <ChevronRight className="w-4 h-4" />
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+export function ThesisSection() {
+  return (
+    <section id="thesis" className={sectionCls}>
+      <div className="grid md:grid-cols-2 gap-16 items-center">
+        <div className="space-y-6">
+          <h2 className={headingCls}>The Missing 82%</h2>
+          <p className={cn(subtextCls, "leading-relaxed")}>
+            Current tools fall into two camps: dumb automation that fires known
+            signatures, and expensive manual human labor. The gap between
+            them—business logic flaws, chained exploits, context-aware
+            authentication bypasses—is where 82% of real-world breaches occur.
+          </p>
+          <ul className="space-y-4 pt-4">
+            {thesisBullets.map((item, i) => (
+              <li key={i} className="flex items-start gap-3">
+                <CheckCircle2 className="w-6 h-6 text-teal-500 shrink-0" />
+                <span className="text-slate-300">{item}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-teal-500/20 to-emerald-500/20 blur-3xl rounded-full" />
+          <div className="relative bg-slate-900 border border-white/10 rounded-2xl p-8 shadow-2xl font-mono text-sm">
+            <div className="flex items-center gap-2 mb-6 border-b border-white/10 pb-4">
+              <div className="w-3 h-3 rounded-full bg-red-500" />
+              <div className="w-3 h-3 rounded-full bg-yellow-500" />
+              <div className="w-3 h-3 rounded-full bg-green-500" />
+              <span className="ml-2 text-slate-500">PENTESTER_WORKFLOW.py</span>
+            </div>
+            <div className="space-y-2 text-slate-300">
+              {codeSnippetLines.map((line) => (
+                <p key={line.key}>
+                  <span className="text-teal-400">&quot;{line.key}&quot;</span>:
+                  &quot;{line.value}&quot;
+                </p>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function FlowSection() {
+  return (
+    <section id="flow" className={sectionCls}>
+      <div className="text-center max-w-3xl mx-auto mb-16">
+        <h2 className={headingCls}>Autonomous Process Flow</h2>
+        <p className={subtextCls}>
+          A state machine mirroring the cognitive cycle of a seasoned security
+          researcher.
+        </p>
+      </div>
+
+      <div className="relative">
+        <div className="hidden lg:block absolute top-1/2 left-0 right-0 h-0.5 bg-gradient-to-r from-teal-500/10 via-teal-500/40 to-emerald-500/10 -translate-y-1/2" />
+        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-6 relative">
+          {workflowSteps.map((step, index) => (
+            <div
+              key={index}
+              className="relative bg-slate-900 border border-white/10 rounded-xl p-6 text-center hover:border-teal-500/50 transition-colors z-10 group"
+            >
+              <div className="w-12 h-12 mx-auto bg-slate-950 border border-teal-500/30 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 group-hover:bg-teal-500/10 transition-all">
+                <step.icon className="w-5 h-5 text-teal-400" />
+              </div>
+              <h3 className="text-white font-semibold mb-2">{step.title}</h3>
+              <p className="text-slate-400 text-sm">{step.desc}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function ModulesSection() {
+  return (
+    <section id="modules" className={sectionCls}>
+      <div className="mb-16">
+        <h2 className={headingCls}>Core Modules</h2>
+        <p className={subtextCls}>
+          Engineered from first principles to handle modern, JS-heavy web
+          architectures.
+        </p>
+      </div>
+
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {coreModules.map((mod, i) => {
+          const Icon = mod.icon;
+          return (
+            <div
+              key={i}
+              className={cn(
+                "bg-linear-to-b from-slate-900 to-slate-950 border border-white/10 rounded-2xl p-8 hover:border-teal-500/30 transition-all",
+                mod.wide && "lg:col-span-2",
+              )}
+            >
+              <div
+                className={cn(
+                  "w-10 h-10 rounded-lg flex items-center justify-center mb-6 border",
+                  mod.iconClass,
+                )}
+              >
+                <Icon className="w-5 h-5" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-3">{mod.title}</h3>
+              <p className="text-slate-400 leading-relaxed">
+                {mod.description}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+export function ComparisonSection() {
+  return (
+    <section className={sectionCls}>
+      <div className="mb-16 text-center">
+        <h2 className={headingCls}>Competitive Landscape</h2>
+        <p className={subtextCls}>
+          Why NAZITEST outperforms existing paradigms.
+        </p>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-white/10 text-slate-400">
+              <th className="py-4 px-6 font-medium">Primitive</th>
+              <th className="py-4 px-6 font-medium">Burp/ZAP</th>
+              <th className="py-4 px-6 font-medium">Nuclei</th>
+              <th className="py-4 px-6 font-medium">Manual Pentester</th>
+              <th className="py-4 px-6 font-semibold text-teal-400">
+                NAZITEST
+              </th>
+            </tr>
+          </thead>
+          <tbody className="text-slate-300">
+            {comparisonRows.map((row, i) => (
+              <tr
+                key={i}
+                className="border-b border-white/5 hover:bg-white/[0.02] transition-colors last:border-b-0"
+              >
+                <td className="py-4 px-6">{row.primitive}</td>
+                <td className="py-4 px-6 text-slate-500">{row.burp}</td>
+                <td className="py-4 px-6 text-slate-500">{row.nuclei}</td>
+                <td className="py-4 px-6 text-emerald-400">{row.manual}</td>
+                <td className="py-4 px-6 text-teal-400 font-medium">
+                  {row.nazitest}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+export function SecuritySection() {
+  return (
+    <section id="security" className={sectionCls}>
+      <div className="bg-red-950/20 border border-red-500/20 rounded-3xl p-8 md:p-12 relative overflow-hidden">
+        <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+          <ShieldAlert className="w-64 h-64 text-red-500" />
+        </div>
+
+        <div className="relative z-10 max-w-3xl">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 text-sm font-semibold mb-6">
+            <Lock className="w-4 h-4" />
+            STRICT AUTHORIZATION GATE
+          </div>
+
+          <h2 className={headingCls}>Unauthorized Testing is Illegal</h2>
+          <p className="text-slate-300 text-lg leading-relaxed mb-8">
+            NAZITEST is engineered exclusively for authorized penetration
+            testing and security research. The system is hardcoded to require
+            explicit written authorization confirmation, strict scope
+            enforcement, and mandatory data sanitization.
+          </p>
+
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="bg-slate-900/50 border border-white/5 rounded-xl p-4">
+              <h4 className="font-semibold text-white mb-1">Strict Scope</h4>
+              <p className="text-sm text-slate-400">
+                Enforced domain whitelists and safe-mode defaults blocking
+                destructive methods.
+              </p>
+            </div>
+            <div className="bg-slate-900/50 border border-white/5 rounded-xl p-4">
+              <h4 className="font-semibold text-white mb-1">Data Protection</h4>
+              <p className="text-sm text-slate-400">
+                LLM data sanitization strips raw credentials before external API
+                routing.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function LandingFooter() {
+  return (
+    <footer className="border-t border-white/5 bg-slate-950 mt-12 py-12">
+      <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-6">
+        <div className="flex items-center gap-2 text-slate-400 font-mono font-bold tracking-wider">
+          <ShieldAlert className="w-5 h-5 text-teal-500" />
+          <span>NAZITEST</span>
+        </div>
+        <p className="text-slate-500 text-sm">
+          © 2026 System Design Engineering. All rights reserved. CONFIDENTIAL.
+        </p>
+      </div>
+    </footer>
+  );
+}
