@@ -30,13 +30,7 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  let session = null;
-  // try {
-  //   session = await auth0.getSession();
-  // } catch (error) {
-  //   console.log(error);
-  // }
-  // console.log(session);
+  const session = await auth0.getSession();
 
   return (
     <html lang="en" className={jetbrainsMono.variable}>

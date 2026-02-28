@@ -1,8 +1,7 @@
-export default function DashboardPage() {
-  return (
-    <div>
-      <h1 className="text-2xl font-semibold">Dashboard</h1>
-      <p className="mt-2 text-muted-foreground">Welcome to your dashboard.</p>
-    </div>
-  );
-}
+import { redirect } from "next/navigation";
+
+const Page = () => {
+  return redirect("/dashboard/home");
+};
+
+export default Page;

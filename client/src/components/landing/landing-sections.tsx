@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Lock,
   LogIn,
-  LogOut,
 } from "lucide-react";
 import { useUser } from "@auth0/nextjs-auth0/client";
 import { Button } from "@/components/ui/button";
@@ -20,6 +19,7 @@ import {
   codeSnippetLines,
 } from "@/app/landing-data";
 import { cn } from "@/lib/utils";
+import Link from "next/link";
 
 const sectionCls = "py-24 border-t border-white/5";
 const headingCls = "text-3xl font-bold text-white mb-4";
@@ -37,13 +37,13 @@ export function LandingNav() {
         </div>
         <div className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
           {navLinks.map((link) => (
-            <a
+            <Link
               key={link.href}
               href={link.href}
               className="hover:text-teal-400 transition-colors"
             >
               {link.label}
-            </a>
+            </Link>
           ))}
         </div>
         <div className="flex items-center gap-2">
@@ -51,9 +51,11 @@ export function LandingNav() {
             <span className="text-slate-500 text-sm">...</span>
           ) : user ? (
             <>
-
-              <Button asChild className="rounded-md bg-teal-500 text-slate-950 hover:bg-teal-400 font-bold ml-2 transition-transform hover:scale-105">
-                <a href="/dashboard">Dashboard</a>
+              <Button
+                asChild
+                className="rounded-md bg-teal-500 text-slate-950 hover:bg-teal-400 font-bold ml-2 transition-transform hover:scale-105"
+              >
+                <Link href="/dashboard/home">Dashboard</Link>
               </Button>
             </>
           ) : (
@@ -82,7 +84,6 @@ export function HeroSection() {
       <div className="absolute top-1/2 left-0 -translate-y-1/2 w-[600px] h-[600px] bg-teal-500/10 blur-[150px] rounded-full pointer-events-none" />
 
       <div className="relative z-10 w-full grid lg:grid-cols-2 gap-16 items-center animate-in fade-in slide-in-from-bottom-8 duration-1000">
-
         {/* Left Column: Text & CTA */}
         <div className="flex flex-col items-start text-left space-y-8">
           {/* Sleek Pill Badge */}
@@ -138,13 +139,24 @@ export function HeroSection() {
             {/* Terminal Output */}
             <div className="flex-1 space-y-3 opacity-90">
               <div className="flex text-slate-500">
-                <span className="text-teal-500 mr-2">❯</span> nazi-cli init --target api.production.com
+                <span className="text-teal-500 mr-2">❯</span> nazi-cli init
+                --target api.production.com
               </div>
-              <div className="text-slate-400">[08:24:12] Authenticating via stored CDP session...</div>
-              <div className="text-teal-400">[08:24:14] Success. DOM context established.</div>
-              <div className="text-slate-400">[08:24:16] Mapping routes and GraphQL endpoints...</div>
-              <div className="text-slate-400">[08:24:19] Discovered 42 endpoints. Extracting fragments...</div>
-              <div className="text-emerald-400">[08:24:22] LLM Agent evaluating mutation vectors...</div>
+              <div className="text-slate-400">
+                [08:24:12] Authenticating via stored CDP session...
+              </div>
+              <div className="text-teal-400">
+                [08:24:14] Success. DOM context established.
+              </div>
+              <div className="text-slate-400">
+                [08:24:16] Mapping routes and GraphQL endpoints...
+              </div>
+              <div className="text-slate-400">
+                [08:24:19] Discovered 42 endpoints. Extracting fragments...
+              </div>
+              <div className="text-emerald-400">
+                [08:24:22] LLM Agent evaluating mutation vectors...
+              </div>
               <div className="flex items-center gap-2 mt-4 text-slate-500">
                 <span className="w-1.5 h-4 bg-teal-500 animate-pulse" />
                 Processing hypothesis tree
@@ -154,7 +166,6 @@ export function HeroSection() {
             <div className="absolute -bottom-20 -right-20 w-64 h-64 bg-emerald-500/20 blur-[100px] rounded-full pointer-events-none" />
           </div>
         </div>
-
       </div>
     </section>
   );
