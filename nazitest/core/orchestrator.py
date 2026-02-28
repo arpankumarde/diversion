@@ -11,15 +11,17 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 
+from nazitest.analysis.codebase_xref import CodebaseXRef, XRefResult
 from nazitest.analysis.graph_builder import GraphBuilder
 from nazitest.analysis.knowledge_graph import KnowledgeGraph
+from nazitest.analysis.repo_fetcher import RepoFetcher
 from nazitest.config import Settings
 from nazitest.core.scope import ScopeEnforcer
 from nazitest.exploitation.curl_exploit import CurlExploiter
 from nazitest.exploitation.engine import ExploitationEngine
 from nazitest.models.config import RunConfig
 from nazitest.models.exploit import ExploitResult
-from nazitest.models.types import ArtifactType, HttpMethod, OrchestratorPhase
+from nazitest.models.types import ArtifactType, EdgeType, HttpMethod, NodeType, OrchestratorPhase
 from nazitest.proxy.manager import ProxyManager
 from nazitest.recon.browser import BrowserController
 from nazitest.recon.dom_snapshot import DOMSnapshotCapture
@@ -65,6 +67,7 @@ class Orchestrator:
         self._usage_tracker: Any = None  # UsageTracker
         self._network_stats: dict[str, Any] = {}
         self._stage_timings: dict[str, dict[str, Any]] = {}
+        self._xref_result: XRefResult | None = None
 
     async def run(self) -> str:
         """Execute the full scan pipeline. Returns the run ID."""
@@ -91,6 +94,15 @@ class Orchestrator:
             self._stage_timings["model"] = {
                 "elapsed_seconds": round(time.time() - t0, 1),
             }
+
+            # CODEBASE phase — optional source code analysis
+            if self.config.repo_url or self.config.codebase_path:
+                self._set_phase(OrchestratorPhase.CODEBASE)
+                t0 = time.time()
+                await self._codebase_phase()
+                self._stage_timings["codebase"] = {
+                    "elapsed_seconds": round(time.time() - t0, 1),
+                }
 
             # REASON phase — LLM hypothesis generation
             self._set_phase(OrchestratorPhase.REASON)
@@ -331,8 +343,11 @@ class Orchestrator:
             strategist = Strategist(client)
             graph_summary = self.knowledge_graph.to_snapshot().model_dump(mode="json")
 
+            # Build code context from codebase analysis
+            code_context = self._build_code_context()
+
             console.print("[blue]Strategist analyzing attack surface...[/blue]")
-            analysis = await strategist.analyze(graph_summary)
+            analysis = await strategist.analyze(graph_summary, code_context=code_context)
             console.print("[green]Analysis complete.[/green]")
 
             # Try structured output first, fall back to text parsing
@@ -341,7 +356,7 @@ class Orchestrator:
             hypotheses_text = ""
             try:
                 hypotheses = await strategist.hypothesize_structured(
-                    analysis, graph_summary
+                    analysis, graph_summary, code_context=code_context,
                 )
                 console.print(
                     f"[green]Structured hypotheses:[/green] {len(hypotheses)} generated"
@@ -958,6 +973,124 @@ class Orchestrator:
             console.print(
                 f"[green]Report generated:[/green] {html_path}"
             )
+
+    async def _codebase_phase(self) -> None:
+        """Run source code analysis: clone repo if needed, then AST analysis."""
+        assert self.store is not None
+        loop = asyncio.get_event_loop()
+
+        # Clone repo if repo_url given but no local codebase_path
+        if self.config.repo_url and not self.config.codebase_path:
+            console.print(f"[blue]Cloning repo:[/blue] {self.config.repo_url}")
+            fetcher = RepoFetcher(cache_dir=self.config.repo_cache_dir)
+            try:
+                local_path = await loop.run_in_executor(
+                    None, fetcher.fetch, self.config.repo_url,
+                )
+                self.config.codebase_path = local_path
+                console.print(f"[green]Repo cached at:[/green] {local_path}")
+            except Exception as e:
+                logger.error("Repo clone failed: %s", e)
+                console.print(f"[red]Repo clone failed: {e}[/red]")
+                return
+
+        if not self.config.codebase_path:
+            return
+
+        console.print(
+            f"[blue]Analyzing codebase:[/blue] {self.config.codebase_path}"
+        )
+
+        xref = CodebaseXRef()
+        try:
+            self._xref_result = await loop.run_in_executor(
+                None, xref.analyze, self.config.codebase_path,
+            )
+        except Exception as e:
+            logger.error("Codebase analysis failed: %s", e)
+            console.print(f"[red]Codebase analysis failed: {e}[/red]")
+            return
+
+        # Save artifact
+        self.store.save(ArtifactType.CODEBASE_XREF, self._xref_result)
+
+        # Inject into knowledge graph
+        self._build_graph_phase3(self._xref_result)
+
+        console.print(
+            f"[green]Codebase analysis:[/green] "
+            f"{len(self._xref_result.routes)} routes, "
+            f"{len(self._xref_result.sink_flows)} sinks, "
+            f"{len(self._xref_result.auth_patterns)} auth patterns, "
+            f"languages: {', '.join(self._xref_result.languages_detected)}"
+        )
+
+    def _build_graph_phase3(self, xref: XRefResult) -> None:
+        """Inject codebase cross-reference into knowledge graph (Phase 3)."""
+        assert self.store is not None
+
+        # Create CODE_HANDLER nodes for each route
+        for route in xref.routes:
+            handler_id = self.knowledge_graph.add_node(
+                NodeType.CODE_HANDLER,
+                f"{','.join(route.methods)} {route.path}",
+                source_file=route.file_path,
+                line_number=route.line_number,
+                framework=route.framework,
+                handler=route.handler,
+            )
+
+            # Try to correlate with existing ENDPOINT nodes by path
+            for ep_id, ep_data in self.knowledge_graph.get_nodes_by_type(NodeType.ENDPOINT):
+                ep_url = ep_data.get("url", "")
+                ep_parsed = urlparse(ep_url)
+                ep_path = ep_parsed.path.rstrip("/") or "/"
+                route_path = route.path.rstrip("/") or "/"
+
+                if ep_path == route_path:
+                    self.knowledge_graph.add_edge(
+                        ep_id, handler_id, EdgeType.HANDLED_BY,
+                    )
+
+            # Annotate handler with nearby sinks
+            nearby_sinks = [
+                s for s in xref.sink_flows
+                if s.file_path == route.file_path
+                and abs(s.line_number - route.line_number) <= 50
+            ]
+            if nearby_sinks:
+                sink_types = list({s.sink_type for s in nearby_sinks})
+                self.knowledge_graph._graph.nodes[handler_id]["nearby_sinks"] = sink_types
+
+        # Save updated graph
+        self.store.save(
+            ArtifactType.KNOWLEDGE_GRAPH,
+            self.knowledge_graph.to_snapshot(),
+        )
+
+    def _build_code_context(self) -> dict | None:
+        """Build code context dict from xref result for LLM reasoning."""
+        if not self._xref_result:
+            return None
+
+        xref = self._xref_result
+        routes = [
+            r.model_dump(mode="json") for r in xref.routes[:20]
+        ]
+        sinks = [
+            s.model_dump(mode="json") for s in xref.sink_flows[:20]
+        ]
+        auth = xref.auth_patterns[:10]
+
+        if not routes and not sinks and not auth:
+            return None
+
+        return {
+            "routes": routes,
+            "sinks": sinks,
+            "auth_patterns": auth,
+            "languages": xref.languages_detected,
+        }
 
     def _save_state(self) -> None:
         """Save current state for resume capability."""

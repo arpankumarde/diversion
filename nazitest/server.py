@@ -28,6 +28,7 @@ RUNS_DIR = Path("./nazitest_runs")
 
 class ScanStartRequest(BaseModel):
     target: str
+    repo: str | None = None
     depth: int = 5
     pages: int = 200
     time_limit: int = 120
@@ -106,6 +107,7 @@ async def start_scan(req: ScanStartRequest) -> ScanStartResponse:
     config = RunConfig(
         scope=scope,
         proxy=proxy,
+        repo_url=req.repo,
         time_limit_minutes=req.time_limit,
         output_dir=RUNS_DIR,
     )

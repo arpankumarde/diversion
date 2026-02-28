@@ -78,6 +78,8 @@ class RunConfig(BaseModel):
     scope: ScopeConfig
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     models_config_path: Path = Field(default=Path("models.yaml"))
+    repo_url: str | None = None
+    repo_cache_dir: Path = Field(default=Path(".nazitest_cache/repos"))
     codebase_path: Path | None = None
     time_limit_minutes: int = 120
     exploit_mode: str = "confirm"  # "confirm" | "safe" | "aggressive"

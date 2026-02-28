@@ -41,6 +41,10 @@ def main(
 @app.command()
 def scan(
     target: Annotated[str, typer.Argument(help="Target URL to scan.")],
+    repo: Annotated[
+        Optional[str],
+        typer.Argument(help="GitHub repo URL for source code analysis (optional)."),
+    ] = None,
     codebase: Annotated[
         Optional[Path],
         typer.Option("--codebase", "-c", help="Path to target source code."),
@@ -68,12 +72,18 @@ def scan(
     hostname = parsed.hostname or ""
     scope_display = parsed.netloc or hostname  # netloc includes port
 
+    panel_lines = [
+        f"[bold]Target:[/bold] {target}",
+        f"[bold]Scope:[/bold] {scope_display} (+ subdomains)",
+    ]
+    if repo:
+        panel_lines.append(f"[bold]Repo:[/bold] {repo}")
+    panel_lines.append(f"[bold]Depth:[/bold] {depth} | [bold]Pages:[/bold] {pages}")
+    panel_lines.append(f"[bold]Time limit:[/bold] {time_limit} min")
+
     console.print(
         Panel(
-            f"[bold]Target:[/bold] {target}\n"
-            f"[bold]Scope:[/bold] {scope_display} (+ subdomains)\n"
-            f"[bold]Depth:[/bold] {depth} | [bold]Pages:[/bold] {pages}\n"
-            f"[bold]Time limit:[/bold] {time_limit} min",
+            "\n".join(panel_lines),
             title="NAZITEST Scan",
             border_style="green",
         )
@@ -102,6 +112,7 @@ def scan(
         scope=scope_config,
         proxy=proxy_config,
         models_config_path=models,
+        repo_url=repo,
         codebase_path=codebase,
         time_limit_minutes=time_limit,
         output_dir=output,

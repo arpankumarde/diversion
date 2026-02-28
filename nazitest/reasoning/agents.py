@@ -76,13 +76,58 @@ class Strategist(BaseAgent):
         "missing a real vulnerability"
     )
 
-    async def analyze(self, graph_summary: dict) -> str:
+    async def analyze(
+        self, graph_summary: dict, code_context: dict | None = None,
+    ) -> str:
         sanitized = self._sanitize(graph_summary)
-        return await self._ask(
-            self.SYSTEM_PROMPT,
+        user_msg = (
             f"Analyze this knowledge graph and create an "
-            f"aggressive pentest plan:\n\n{sanitized}",
+            f"aggressive pentest plan:\n\n{sanitized}"
         )
+        if code_context:
+            user_msg += self._format_code_context(code_context)
+        return await self._ask(self.SYSTEM_PROMPT, user_msg)
+
+    @staticmethod
+    def _format_code_context(code_context: dict) -> str:
+        """Format code analysis results for LLM context."""
+        lines = ["\n\n--- SOURCE CODE ANALYSIS ---"]
+
+        routes = code_context.get("routes", [])
+        if routes:
+            lines.append("Discovered routes from source code:")
+            for r in routes:
+                methods = ", ".join(r.get("methods", ["?"]))
+                handler = r.get("handler", "")
+                fpath = r.get("file_path", "")
+                lnum = r.get("line_number", 0)
+                handler_info = f" -> {handler}" if handler else ""
+                loc_info = f" ({fpath}:{lnum})" if fpath else ""
+                lines.append(f"  [{methods}] {r.get('path', '?')}{handler_info}{loc_info}")
+
+        sinks = code_context.get("sinks", [])
+        if sinks:
+            lines.append("\nDangerous sinks detected:")
+            for s in sinks:
+                lines.append(
+                    f"  {s.get('sink_type', '?')}: {s.get('sink', '?')} "
+                    f"at {s.get('file_path', '?')}:{s.get('line_number', 0)}"
+                )
+
+        auth = code_context.get("auth_patterns", [])
+        if auth:
+            lines.append("\nAuthentication patterns:")
+            for a in auth:
+                lines.append(
+                    f"  {a.get('type', '?')}: {a.get('name', '?')} "
+                    f"at {a.get('file_path', '?')}:{a.get('line_number', 0)}"
+                )
+
+        lines.append(
+            "\nIf a route has a dangerous sink nearby in the same file, "
+            "rate confidence 0.9+."
+        )
+        return "\n".join(lines)
 
     async def hypothesize(
         self, analysis: str, graph_summary: dict
@@ -192,11 +237,13 @@ class Strategist(BaseAgent):
     }
 
     async def hypothesize_structured(
-        self, analysis: str, graph_summary: dict
+        self,
+        analysis: str,
+        graph_summary: dict,
+        code_context: dict | None = None,
     ) -> list[Hypothesis]:
         sanitized = self._sanitize(graph_summary)
-        raw = await self._ask(
-            self.SYSTEM_PROMPT,
+        user_msg = (
             f"Based on this analysis:\n{analysis}\n\n"
             f"Knowledge graph:\n{sanitized}\n\n"
             "Generate vulnerability hypotheses as JSON. "
@@ -212,7 +259,13 @@ class Strategist(BaseAgent):
             "- vuln_type: sqli, xss, cmdi, idor, ssrf, csrf, "
             "path_traversal, etc.\n"
             "- severity: critical/high/medium/low/info\n"
-            "- confidence: 0.0-1.0",
+            "- confidence: 0.0-1.0"
+        )
+        if code_context:
+            user_msg += self._format_code_context(code_context)
+        raw = await self._ask(
+            self.SYSTEM_PROMPT,
+            user_msg,
             structured_output=self.HYPOTHESES_SCHEMA,
         )
         return self._parse_hypotheses(raw)

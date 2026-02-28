@@ -19,6 +19,7 @@ ARTIFACT_PATHS: dict[ArtifactType, str] = {
     ArtifactType.WEBSOCKET_LOG: "recon/websockets",
     ArtifactType.SITE_MAP: "recon",
     ArtifactType.TECH_STACK: "recon",
+    ArtifactType.CODEBASE_XREF: "analysis/codebase_xref",
     ArtifactType.KNOWLEDGE_GRAPH: "analysis/knowledge_graph",
     ArtifactType.HYPOTHESIS: "analysis/knowledge_graph",
     ArtifactType.LLM_SESSION: "analysis/llm_reasoning",

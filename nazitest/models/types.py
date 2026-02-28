@@ -29,6 +29,7 @@ class OrchestratorPhase(str, Enum):
     CRAWL = "crawl"
     RECORD = "record"
     MODEL = "model"
+    CODEBASE = "codebase"
     REASON = "reason"
     EXPLOIT = "exploit"
     REPORT = "report"
@@ -61,6 +62,7 @@ class ArtifactType(str, Enum):
     REPORT = "report"
     CONFIG = "config"
     AUTHORIZATION = "authorization"
+    CODEBASE_XREF = "codebase_xref"
     LLM_SESSION = "llm_session"
 
 
