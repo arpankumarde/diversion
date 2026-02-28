@@ -14,9 +14,13 @@ from nazitest.analysis.graph_builder import GraphBuilder
 from nazitest.analysis.knowledge_graph import KnowledgeGraph
 from nazitest.config import Settings
 from nazitest.core.scope import ScopeEnforcer
+from nazitest.exploitation.curl_exploit import CurlExploiter
+from nazitest.exploitation.engine import ExploitationEngine
 from nazitest.models.config import RunConfig
+from nazitest.models.exploit import ExploitResult
 from nazitest.models.types import ArtifactType, OrchestratorPhase
 from nazitest.proxy.manager import ProxyManager
+from nazitest.reasoning.belief import BeliefRefinementLoop
 from nazitest.recon.browser import BrowserController
 from nazitest.recon.dom_snapshot import DOMSnapshotCapture
 from nazitest.recon.har_recorder import HARRecorder
@@ -51,6 +55,7 @@ class Orchestrator:
         # Initialized during run
         self.store: ArtifactStore | None = None
         self.start_time: float = 0.0
+        self.exploit_results: list[ExploitResult] = []
 
     async def run(self) -> str:
         """Execute the full scan pipeline. Returns the run ID."""
@@ -76,10 +81,7 @@ class Orchestrator:
 
             # EXPLOIT phase
             self._set_phase(OrchestratorPhase.EXPLOIT)
-            console.print(
-                "[yellow]Exploitation phase deferred to "
-                "reasoning output.[/yellow]"
-            )
+            await self._exploit()
 
             # REPORT phase
             self._set_phase(OrchestratorPhase.REPORT)
@@ -341,6 +343,249 @@ class Orchestrator:
         finally:
             await client.close()
 
+    async def _exploit(self) -> None:
+        """Run the exploitation pipeline against all hypotheses."""
+        assert self.store is not None
+
+        if not self.settings.openrouter_api_key:
+            console.print(
+                "[yellow]No OpenRouter API key configured. "
+                "Skipping exploitation phase.[/yellow]"
+            )
+            return
+
+        hypotheses = self.knowledge_graph.get_all_hypotheses()
+        if not hypotheses:
+            console.print("[yellow]No hypotheses to exploit.[/yellow]")
+            return
+
+        # Load cookies from manual browse phase
+        cookies: dict[str, str] = {}
+        try:
+            cookie_files = self.store.list_artifacts(
+                ArtifactType.COOKIE_JAR
+            )
+            if cookie_files:
+                cookie_data = self.store.load(
+                    ArtifactType.COOKIE_JAR, cookie_files[-1]
+                )
+                for c in cookie_data.get("cookies", []):
+                    if (
+                        isinstance(c, dict)
+                        and "name" in c
+                        and "value" in c
+                    ):
+                        cookies[c["name"]] = c["value"]
+        except Exception as e:
+            logger.warning("Could not load cookies: %s", e)
+
+        # Create LLM client and agents
+        from nazitest.reasoning.agents import (
+            CrossValidator,
+            ExploitPlanner,
+            Scout,
+        )
+        from nazitest.reasoning.openrouter import OpenRouterClient
+
+        client = OpenRouterClient(
+            api_key=self.settings.openrouter_api_key,
+            models=self.settings.models.models,
+            base_url=self.settings.openrouter_base_url,
+            budget_limit=self.settings.models.budget.max_cost_per_run_usd,
+            warn_at=self.settings.models.budget.warn_at_usd,
+        )
+
+        # Create exploitation engine
+        proxy_url = self.proxy_manager.get_proxy_url("exploit")
+        curl_exploiter = CurlExploiter(proxy_url=proxy_url)
+        engine = ExploitationEngine(curl_exploiter=curl_exploiter)
+
+        belief = BeliefRefinementLoop()
+        scout = Scout(client)
+        cross_validator = CrossValidator(client)
+        exploit_planner = ExploitPlanner(client)
+
+        # Sort hypotheses by confidence descending
+        sorted_hypotheses = sorted(
+            hypotheses, key=lambda h: h.confidence, reverse=True
+        )
+        total = len(sorted_hypotheses)
+
+        try:
+            for idx, h in enumerate(sorted_hypotheses, 1):
+                if not self._check_time_limit():
+                    console.print(
+                        "[yellow]Time limit reached, "
+                        "stopping exploitation.[/yellow]"
+                    )
+                    break
+
+                console.print(
+                    f"\n[bold][{idx}/{total}] {h.title}[/bold]"
+                )
+                h_dict = h.model_dump(mode="json")
+                graph_evidence = (
+                    self.knowledge_graph.to_snapshot()
+                    .model_dump(mode="json")
+                )
+
+                try:
+                    # --- Scout investigation ---
+                    scout_response = await scout.investigate(
+                        h_dict, graph_evidence
+                    )
+                    scout_confidence = (
+                        BeliefRefinementLoop
+                        .parse_confidence_from_llm(scout_response)
+                    )
+                    if scout_confidence is None:
+                        scout_confidence = h.confidence
+                    evidence_strength = min(scout_confidence, 0.8)
+                    updated = belief.update_belief(
+                        h, scout_confidence, evidence_strength
+                    )
+                    console.print(
+                        f"  Scout confidence: "
+                        f"{scout_confidence:.2f} "
+                        f"→ belief: {updated:.2f}"
+                    )
+
+                    # --- Cross-validation gate ---
+                    if belief.is_ready_for_cross_validation(h):
+                        cv_response = (
+                            await cross_validator.challenge(
+                                h_dict, graph_evidence
+                            )
+                        )
+                        validator_confidence = (
+                            BeliefRefinementLoop
+                            .parse_confidence_from_llm(cv_response)
+                        )
+                        if validator_confidence is not None:
+                            reconciled = belief.reconcile(
+                                h, validator_confidence
+                            )
+                            console.print(
+                                f"  CrossValidator confidence: "
+                                f"{validator_confidence:.2f}"
+                                f" → reconciled: {reconciled:.2f}"
+                            )
+                        else:
+                            console.print(
+                                "  CrossValidator: could not "
+                                "parse confidence"
+                            )
+                    else:
+                        console.print(
+                            "  CrossValidator: "
+                            "skipped (below 0.6)"
+                        )
+
+                    # --- Exploitation gate ---
+                    if belief.is_ready_for_exploitation(h):
+                        strategy = (
+                            await exploit_planner.plan_structured(
+                                h_dict, []
+                            )
+                        )
+                        result = await engine.exploit(
+                            strategy, cookies or None
+                        )
+
+                        any_blocked = any(
+                            a.blocked for a in result.attempts
+                        )
+                        belief.apply_exploitation_result(
+                            h, result.confirmed, any_blocked
+                        )
+
+                        if result.confirmed:
+                            console.print(
+                                f"  Exploit: "
+                                f"{strategy.http_method.value} "
+                                f"{strategy.url}"
+                                f" → [bold green]CONFIRMED"
+                                f"[/bold green]"
+                                f" — confidence: "
+                                f"{h.confidence:.1f}"
+                            )
+                            # Save PoC artifact
+                            self.store.save(
+                                ArtifactType.POC,
+                                {
+                                    "hypothesis_id": h.id,
+                                    "title": h.title,
+                                    "poc_script": (
+                                        result.poc_script
+                                    ),
+                                    "evidence_summary": (
+                                        result.evidence_summary
+                                    ),
+                                },
+                                name=h.id,
+                            )
+                        else:
+                            status = (
+                                "BLOCKED"
+                                if any_blocked
+                                else "NOT CONFIRMED"
+                            )
+                            console.print(
+                                f"  Exploit: "
+                                f"{strategy.http_method.value} "
+                                f"{strategy.url}"
+                                f" → {status}"
+                                f" — confidence: "
+                                f"{h.confidence:.2f}"
+                            )
+
+                        # Save exploit result artifact
+                        self.store.save(
+                            ArtifactType.EXPLOIT_ATTEMPT,
+                            result.model_dump(mode="json"),
+                            name=h.id,
+                        )
+                        self.exploit_results.append(result)
+                    else:
+                        console.print(
+                            f"  Exploitation: skipped "
+                            f"(confidence "
+                            f"{h.confidence:.2f} < 0.75)"
+                        )
+
+                    # Update hypothesis in knowledge graph
+                    self.knowledge_graph.add_hypothesis(h)
+
+                except Exception as e:
+                    logger.warning(
+                        "Hypothesis %s failed: %s", h.id, e
+                    )
+                    console.print(f"  [red]Error: {e}[/red]")
+                    continue
+
+            # Save final knowledge graph
+            self.store.save(
+                ArtifactType.KNOWLEDGE_GRAPH,
+                self.knowledge_graph.to_snapshot(),
+            )
+
+            confirmed_count = sum(
+                1 for r in self.exploit_results if r.confirmed
+            )
+            console.print(
+                f"\n[green]Exploitation complete.[/green] "
+                f"{len(self.exploit_results)} tested, "
+                f"{confirmed_count} confirmed. "
+                f"Cost: ${client.usage.total_cost_usd:.4f}"
+            )
+        except Exception as e:
+            logger.warning("Exploitation phase failed: %s", e)
+            console.print(
+                f"[yellow]Exploitation phase error: {e}[/yellow]"
+            )
+        finally:
+            await client.close()
+
     def _generate_report(self) -> None:
         """Generate the final report."""
         assert self.store is not None
@@ -349,6 +594,7 @@ class Orchestrator:
 
         html_path = gen.generate(
             graph=snapshot,
+            exploit_results=self.exploit_results,
             target_url=self.config.scope.target_url,
             run_id=self.run_id,
         )

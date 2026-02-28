@@ -10,7 +10,7 @@ class TestModelsConfig:
         config = load_models_config(Path("models.yaml"))
         assert "strategist" in config.models
         assert "scout" in config.models
-        assert config.models["strategist"].id == "anthropic/claude-opus-4.6"
+        assert config.models["strategist"].id == "anthropic/claude-sonnet-4.6"
         assert config.budget.max_cost_per_run_usd == 10.0
 
     def test_model_roles_complete(self) -> None:

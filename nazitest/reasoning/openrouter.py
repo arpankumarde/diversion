@@ -158,6 +158,22 @@ class OpenRouterClient:
                     await asyncio.sleep(wait)
                     continue
 
+                # json_schema not supported — retry with json_object
+                if (
+                    response.status_code == 400
+                    and structured_output
+                    and payload["response_format"]["type"]
+                    == "json_schema"
+                ):
+                    logger.info(
+                        "json_schema not supported, "
+                        "falling back to json_object"
+                    )
+                    payload["response_format"] = {
+                        "type": "json_object",
+                    }
+                    continue
+
                 response.raise_for_status()
                 data = response.json()
 
