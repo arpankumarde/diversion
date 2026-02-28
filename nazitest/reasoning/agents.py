@@ -91,6 +91,7 @@ class Strategist(BaseAgent):
 
     HYPOTHESES_SCHEMA: dict[str, Any] = {
         "name": "hypotheses",
+        "strict": True,
         "schema": {
             "type": "object",
             "properties": {
@@ -105,7 +106,13 @@ class Strategist(BaseAgent):
                             "vuln_type": {"type": "string"},
                             "severity": {
                                 "type": "string",
-                                "enum": ["critical", "high", "medium", "low", "info"],
+                                "enum": [
+                                    "critical",
+                                    "high",
+                                    "medium",
+                                    "low",
+                                    "info",
+                                ],
                             },
                             "confidence": {"type": "number"},
                             "target_endpoint": {"type": "string"},
@@ -113,11 +120,24 @@ class Strategist(BaseAgent):
                             "owasp_category": {"type": "string"},
                             "cwe_id": {"type": "string"},
                         },
-                        "required": ["id", "title", "description"],
+                        "required": [
+                            "id",
+                            "title",
+                            "description",
+                            "vuln_type",
+                            "severity",
+                            "confidence",
+                            "target_endpoint",
+                            "target_parameter",
+                            "owasp_category",
+                            "cwe_id",
+                        ],
+                        "additionalProperties": False,
                     },
                 }
             },
             "required": ["hypotheses"],
+            "additionalProperties": False,
         },
     }
 
@@ -172,24 +192,69 @@ class Strategist(BaseAgent):
         except (json.JSONDecodeError, TypeError, KeyError):
             pass
 
-        # Fallback: regex parse from markdown text
+        # Fallback: split on "HYPOTHESIS N:" pattern to get real blocks
         hypotheses = []
-        # Match sections starting with "## " or "### " or numbered items
-        blocks = re.split(r"(?:^|\n)(?:#{2,3}\s+|\d+\.\s+)", raw)
+        blocks = re.split(
+            r"(?:^|\n)(?:#{1,3}\s*)?HYPOTHESIS\s+\d+\s*[:—–-]\s*",
+            raw,
+            flags=re.IGNORECASE,
+        )
         for block in blocks:
             block = block.strip()
             if not block:
                 continue
             lines = block.split("\n")
             title = lines[0].strip().rstrip(":")
-            if not title or len(title) < 3:
+            if not title or len(title) < 5:
                 continue
-            description = "\n".join(lines[1:]).strip() if len(lines) > 1 else title
+            body = "\n".join(lines[1:])
+
+            # Try to extract structured fields from the markdown body
+            def _extract(label: str) -> str:
+                m = re.search(
+                    rf"(?:^|\n)\**{label}\**[:\s]*\**\s*(.+?)(?:\n\**[A-Z]|\n---|\Z)",
+                    body,
+                    re.DOTALL | re.IGNORECASE,
+                )
+                return m.group(1).strip() if m else ""
+
+            desc = _extract("Description")
+            vuln_type = _extract("Vulnerability Type")
+            owasp = _extract("OWASP Category")
+            cwe = _extract("CWE")
+            endpoint = _extract("Target")
+            sev_raw = _extract("Estimated Severity") or _extract("Severity")
+
+            # Parse severity from text like "CRITICAL (CVSS 9.8)"
+            severity = Severity.MEDIUM
+            if sev_raw:
+                for s in Severity:
+                    if s.value in sev_raw.lower():
+                        severity = s
+                        break
+
+            # Parse confidence from summary table if present
+            conf = 0.3
+            conf_match = re.search(
+                re.escape(title[:40]) + r".*?(\d{1,3})%",
+                raw,
+            )
+            if conf_match:
+                conf = int(conf_match.group(1)) / 100.0
+
             hypotheses.append(
                 Hypothesis(
                     id=f"hyp-{uuid.uuid4().hex[:8]}",
                     title=title[:200],
-                    description=description[:2000],
+                    description=(desc or body)[:2000],
+                    vuln_type=vuln_type.strip("`").split("—")[0].strip()
+                    if vuln_type
+                    else "",
+                    severity=severity,
+                    confidence=conf,
+                    target_endpoint=endpoint[:500] if endpoint else "",
+                    owasp_category=owasp.strip("*").strip() if owasp else "",
+                    cwe_id=cwe.strip() if cwe else "",
                 )
             )
         return hypotheses

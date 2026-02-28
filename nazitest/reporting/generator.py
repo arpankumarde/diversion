@@ -65,7 +65,7 @@ class ReportGenerator:
     ) -> dict[str, Any]:
         hypotheses = graph.hypotheses if graph else []
         confirmed = [h for h in hypotheses if h.confirmed]
-        by_severity = self._group_by_severity(confirmed)
+        by_severity = self._group_by_severity(hypotheses)
 
         return {
             "metadata": {
@@ -85,7 +85,7 @@ class ReportGenerator:
                 "info": len(by_severity.get(Severity.INFO, [])),
             },
             "vulnerabilities": [
-                self._vuln_to_dict(h, exploit_results) for h in confirmed
+                self._vuln_to_dict(h, exploit_results) for h in hypotheses
             ],
             "all_hypotheses": [h.model_dump(mode="json") for h in hypotheses],
             "graph_stats": {

@@ -13,7 +13,6 @@ from rich.console import Console
 from nazitest.analysis.graph_builder import GraphBuilder
 from nazitest.analysis.knowledge_graph import KnowledgeGraph
 from nazitest.config import Settings
-from nazitest.core.auth_gate import AuthorizationGate
 from nazitest.core.scope import ScopeEnforcer
 from nazitest.models.config import RunConfig
 from nazitest.models.types import ArtifactType, OrchestratorPhase
@@ -63,12 +62,6 @@ class Orchestrator:
             self.start_time = time.time()
             console.print(f"[green]Run created:[/green] {self.run_id}")
 
-            # AUTHORIZE phase
-            self._set_phase(OrchestratorPhase.AUTHORIZE)
-            if not await self._authorize():
-                console.print("[red]Authorization denied. Aborting.[/red]")
-                return self.run_id
-
             # CRAWL + RECORD phase
             self._set_phase(OrchestratorPhase.CRAWL)
             await self._crawl()
@@ -82,12 +75,11 @@ class Orchestrator:
             await self._reason()
 
             # EXPLOIT phase
-            if self.config.exploit_mode != "none":
-                self._set_phase(OrchestratorPhase.EXPLOIT)
-                console.print(
-                    "[yellow]Exploitation phase deferred to "
-                    "reasoning output.[/yellow]"
-                )
+            self._set_phase(OrchestratorPhase.EXPLOIT)
+            console.print(
+                "[yellow]Exploitation phase deferred to "
+                "reasoning output.[/yellow]"
+            )
 
             # REPORT phase
             self._set_phase(OrchestratorPhase.REPORT)
@@ -109,20 +101,6 @@ class Orchestrator:
             self._save_state()
 
         return self.run_id
-
-    async def _authorize(self) -> bool:
-        """Run the authorization gate."""
-        gate = AuthorizationGate(self.run_path)
-
-        # Check if already authorized (resuming)
-        if gate.is_authorized():
-            console.print("[green]Previously authorized — continuing.[/green]")
-            return True
-
-        return gate.require_authorization(
-            self.config.scope.target_url,
-            self.config.scope,
-        )
 
     async def _crawl(self) -> None:
         """Open a visible browser for the user to manually browse the target.

@@ -41,10 +41,6 @@ def main(
 @app.command()
 def scan(
     target: Annotated[str, typer.Argument(help="Target URL to scan.")],
-    scope: Annotated[
-        Optional[str],
-        typer.Option("--scope", "-s", help="Allowed domain scope (comma-separated)."),
-    ] = None,
     codebase: Annotated[
         Optional[Path],
         typer.Option("--codebase", "-c", help="Path to target source code."),
@@ -62,23 +58,19 @@ def scan(
     time_limit: Annotated[
         int, typer.Option("--time-limit", help="Time limit in minutes.")
     ] = 120,
-    exploit_mode: Annotated[
-        str,
-        typer.Option("--exploit-mode", help="Exploit mode: confirm|safe|aggressive."),
-    ] = "confirm",
-    no_exploit: Annotated[
-        bool, typer.Option("--no-exploit", help="Skip exploitation phase.")
-    ] = False,
     output: Annotated[
         Path, typer.Option("--output", "-o", help="Output directory.")
     ] = Path("./nazitest_runs"),
 ) -> None:
     """Start a new penetration test scan."""
+    # Auto-derive scope: domain + all subdomains
+    parsed = urlparse(target)
+    hostname = parsed.hostname or ""
+
     console.print(
         Panel(
             f"[bold]Target:[/bold] {target}\n"
-            f"[bold]Scope:[/bold] {scope or 'auto-detect'}\n"
-            f"[bold]Exploit mode:[/bold] {'disabled' if no_exploit else exploit_mode}\n"
+            f"[bold]Scope:[/bold] {hostname} (+ subdomains)\n"
             f"[bold]Depth:[/bold] {depth} | [bold]Pages:[/bold] {pages}\n"
             f"[bold]Time limit:[/bold] {time_limit} min",
             title="NAZITEST Scan",
@@ -90,14 +82,10 @@ def scan(
     from nazitest.core.orchestrator import Orchestrator
     from nazitest.models.config import ProxyConfig, ProxyEntry, RunConfig, ScopeConfig
 
-    # Auto-detect domain from target URL if no scope provided
-    parsed = urlparse(target)
-    hostname = parsed.hostname or ""
-    allowed_domains = [d.strip() for d in scope.split(",")] if scope else [hostname]
-
     scope_config = ScopeConfig(
         target_url=target,
-        allowed_domains=allowed_domains,
+        allowed_domains=[hostname],
+        include_subdomains=True,
         max_crawl_depth=depth,
         max_crawl_pages=pages,
     )
@@ -115,7 +103,6 @@ def scan(
         models_config_path=models,
         codebase_path=codebase,
         time_limit_minutes=time_limit,
-        exploit_mode="none" if no_exploit else exploit_mode,
         output_dir=output,
     )
 
