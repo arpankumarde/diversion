@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from rich.console import Console
@@ -56,6 +57,8 @@ class Orchestrator:
         self.store: ArtifactStore | None = None
         self.start_time: float = 0.0
         self.exploit_results: list[ExploitResult] = []
+        self._usage_tracker: Any = None  # UsageTracker, set during run
+        self._network_stats: dict[str, Any] = {}
 
     async def run(self) -> str:
         """Execute the full scan pipeline. Returns the run ID."""
@@ -332,14 +335,22 @@ class Orchestrator:
                 name="strategist",
             )
 
+            # Accumulate usage for meta.json
+            from nazitest.reasoning.openrouter import UsageTracker
+
+            if self._usage_tracker is None:
+                self._usage_tracker = UsageTracker()
+            self._usage_tracker.merge(client.usage)
+
             console.print(
                 f"[green]Reasoning complete.[/green] "
-                f"{len(hypotheses)} hypotheses added to graph. "
-                f"Cost: ${client.usage.total_cost_usd:.4f}"
+                f"{len(hypotheses)} hypotheses added to graph."
             )
         except Exception as e:
             logger.warning("Reasoning phase failed: %s", e)
-            console.print(f"[yellow]Reasoning phase error: {e}[/yellow]")
+            console.print(
+                f"[yellow]Reasoning phase error: {e}[/yellow]"
+            )
         finally:
             await client.close()
 
@@ -573,28 +584,59 @@ class Orchestrator:
                 self.knowledge_graph.to_snapshot(),
             )
 
+            # Accumulate usage for meta.json
+            from nazitest.reasoning.openrouter import UsageTracker
+
+            if self._usage_tracker is None:
+                self._usage_tracker = UsageTracker()
+            self._usage_tracker.merge(client.usage)
+
+            # Capture network stats from exploit attempts
+            total_attempts = sum(
+                len(r.attempts) for r in self.exploit_results
+            )
+            blocked_attempts = sum(
+                sum(1 for a in r.attempts if a.blocked)
+                for r in self.exploit_results
+            )
             confirmed_count = sum(
                 1 for r in self.exploit_results if r.confirmed
             )
+            self._network_stats = {
+                "exploit_requests_sent": total_attempts,
+                "exploit_requests_blocked": blocked_attempts,
+                "hypotheses_tested": len(
+                    self.exploit_results
+                ),
+                "hypotheses_confirmed": confirmed_count,
+            }
+
             console.print(
                 f"\n[green]Exploitation complete.[/green] "
                 f"{len(self.exploit_results)} tested, "
-                f"{confirmed_count} confirmed. "
-                f"Cost: ${client.usage.total_cost_usd:.4f}"
+                f"{confirmed_count} confirmed."
             )
         except Exception as e:
             logger.warning("Exploitation phase failed: %s", e)
             console.print(
-                f"[yellow]Exploitation phase error: {e}[/yellow]"
+                f"[yellow]Exploitation phase error: "
+                f"{e}[/yellow]"
             )
         finally:
             await client.close()
 
     def _generate_report(self) -> None:
-        """Generate the final report."""
+        """Generate the final report and meta.json."""
         assert self.store is not None
         gen = ReportGenerator(self.run_path)
         snapshot = self.knowledge_graph.to_snapshot()
+
+        elapsed = time.time() - self.start_time
+        usage_summary = (
+            self._usage_tracker.summary()
+            if self._usage_tracker
+            else {}
+        )
 
         html_path = gen.generate(
             graph=snapshot,
@@ -602,7 +644,60 @@ class Orchestrator:
             target_url=self.config.scope.target_url,
             run_id=self.run_id,
         )
-        console.print(f"[green]Report generated:[/green] {html_path}")
+
+        # Save meta.json with tokens, costs, network stats
+        meta = {
+            "run_id": self.run_id,
+            "target_url": self.config.scope.target_url,
+            "generated_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%S%z"
+            ),
+            "elapsed_seconds": round(elapsed, 1),
+            "phases_completed": self.phase.value,
+            "llm_usage": usage_summary,
+            "network": {
+                "recon_pages_captured": len(
+                    self.store.list_artifacts(
+                        ArtifactType.DOM_SNAPSHOT
+                    )
+                ),
+                "recon_har_files": len(
+                    self.store.list_artifacts(ArtifactType.HAR)
+                ),
+                **self._network_stats,
+            },
+            "knowledge_graph": {
+                "nodes": self.knowledge_graph.node_count,
+                "edges": self.knowledge_graph.edge_count,
+                "hypotheses": len(
+                    self.knowledge_graph.get_all_hypotheses()
+                ),
+                "confirmed": len(
+                    self.knowledge_graph.get_confirmed_hypotheses()
+                ),
+            },
+        }
+        gen.save_meta(meta)
+
+        # Print cost summary
+        if usage_summary:
+            cost = usage_summary.get("total_cost_usd", 0)
+            in_tok = usage_summary.get("total_input_tokens", 0)
+            out_tok = usage_summary.get(
+                "total_output_tokens", 0
+            )
+            console.print(
+                f"[green]Report generated:[/green] {html_path}"
+            )
+            console.print(
+                f"[blue]LLM usage:[/blue] "
+                f"{in_tok:,} input + {out_tok:,} output "
+                f"tokens = ${cost:.4f}"
+            )
+        else:
+            console.print(
+                f"[green]Report generated:[/green] {html_path}"
+            )
 
     def _save_state(self) -> None:
         """Save current state for resume capability."""

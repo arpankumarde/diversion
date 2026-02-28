@@ -56,6 +56,14 @@ class ReportGenerator:
 
         return html_path
 
+    def save_meta(self, meta: dict[str, Any]) -> Path:
+        """Save meta.json with run metadata, token usage, and network stats."""
+        meta_path = self.report_dir / "meta.json"
+        meta_path.write_bytes(
+            orjson.dumps(meta, option=orjson.OPT_INDENT_2)
+        )
+        return meta_path
+
     def _build_report_data(
         self,
         graph: GraphSnapshot | None,

@@ -15,20 +15,79 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
+# Pricing per million tokens (USD) — updated Feb 2026
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    "anthropic/claude-sonnet-4.6": {
+        "input": 3.0,
+        "output": 15.0,
+    },
+    "anthropic/claude-sonnet-4.5": {
+        "input": 3.0,
+        "output": 15.0,
+    },
+    "anthropic/claude-sonnet-4": {
+        "input": 3.0,
+        "output": 15.0,
+    },
+    "anthropic/claude-haiku-4.5": {
+        "input": 1.0,
+        "output": 5.0,
+    },
+    "anthropic/claude-opus-4.6": {
+        "input": 5.0,
+        "output": 25.0,
+    },
+    "anthropic/claude-opus-4.5": {
+        "input": 5.0,
+        "output": 25.0,
+    },
+    "anthropic/claude-3-haiku": {
+        "input": 0.25,
+        "output": 1.25,
+    },
+}
+
+
+def _compute_cost(
+    model: str, input_tokens: int, output_tokens: int
+) -> float:
+    """Compute cost in USD from token counts and model pricing."""
+    pricing = MODEL_PRICING.get(model)
+    if not pricing:
+        return 0.0
+    return (
+        input_tokens * pricing["input"] / 1_000_000
+        + output_tokens * pricing["output"] / 1_000_000
+    )
+
+
 class UsageTracker:
     """Tracks LLM API token usage and costs."""
 
-    def __init__(self, budget_limit: float = 10.0, warn_at: float = 7.5) -> None:
+    def __init__(
+        self,
+        budget_limit: float = 10.0,
+        warn_at: float = 7.5,
+    ) -> None:
         self.budget_limit = budget_limit
         self.warn_at = warn_at
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost_usd = 0.0
         self.calls: list[dict[str, Any]] = []
+        self._per_model: dict[str, dict[str, Any]] = {}
 
     def record(
-        self, model: str, input_tokens: int, output_tokens: int, cost: float
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost: float = 0.0,
     ) -> None:
+        # Compute cost from tokens if not provided
+        if cost <= 0:
+            cost = _compute_cost(model, input_tokens, output_tokens)
+
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
         self.total_cost_usd += cost
@@ -37,17 +96,51 @@ class UsageTracker:
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "cost": cost,
+                "cost_usd": round(cost, 6),
                 "timestamp": time.time(),
             }
         )
 
+        # Per-model aggregation
+        if model not in self._per_model:
+            self._per_model[model] = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd": 0.0,
+                "calls": 0,
+            }
+        m = self._per_model[model]
+        m["input_tokens"] += input_tokens
+        m["output_tokens"] += output_tokens
+        m["cost_usd"] += cost
+        m["calls"] += 1
+
         if self.total_cost_usd >= self.warn_at:
             logger.warning(
-                "LLM budget warning: $%.2f / $%.2f used",
+                "LLM budget warning: $%.4f / $%.2f used",
                 self.total_cost_usd,
                 self.budget_limit,
             )
+
+    def merge(self, other: UsageTracker) -> None:
+        """Merge another tracker's data into this one."""
+        self.total_input_tokens += other.total_input_tokens
+        self.total_output_tokens += other.total_output_tokens
+        self.total_cost_usd += other.total_cost_usd
+        self.calls.extend(other.calls)
+        for model, data in other._per_model.items():
+            if model not in self._per_model:
+                self._per_model[model] = {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0,
+                    "calls": 0,
+                }
+            m = self._per_model[model]
+            m["input_tokens"] += data["input_tokens"]
+            m["output_tokens"] += data["output_tokens"]
+            m["cost_usd"] += data["cost_usd"]
+            m["calls"] += data["calls"]
 
     @property
     def budget_exceeded(self) -> bool:
@@ -57,9 +150,19 @@ class UsageTracker:
         return {
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
-            "total_cost_usd": round(self.total_cost_usd, 4),
+            "total_cost_usd": round(self.total_cost_usd, 6),
             "total_calls": len(self.calls),
             "budget_limit": self.budget_limit,
+            "per_model": {
+                model: {
+                    "input_tokens": d["input_tokens"],
+                    "output_tokens": d["output_tokens"],
+                    "cost_usd": round(d["cost_usd"], 6),
+                    "calls": d["calls"],
+                }
+                for model, d in self._per_model.items()
+            },
+            "calls": self.calls,
         }
 
 
