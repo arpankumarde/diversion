@@ -128,13 +128,13 @@ class TestBeliefRefinement:
 
     def test_thresholds(self) -> None:
         loop = BeliefRefinementLoop()
-        h = self._make_hypothesis(0.5)
+        h = self._make_hypothesis(0.3)
         assert not loop.is_ready_for_cross_validation(h)
         assert not loop.is_ready_for_exploitation(h)
 
-        h.confidence = 0.65
+        h.confidence = 0.55
         assert loop.is_ready_for_cross_validation(h)
-        assert not loop.is_ready_for_exploitation(h)
+        assert loop.is_ready_for_exploitation(h)
 
         h.confidence = 0.8
         assert loop.is_ready_for_exploitation(h)

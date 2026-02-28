@@ -1,4 +1,4 @@
-"""Belief refinement loop — hypothesis confidence tracking per PRD section 7."""
+"""Belief refinement loop — hypothesis confidence tracking."""
 
 from __future__ import annotations
 
@@ -9,16 +9,17 @@ from nazitest.models.graph import Hypothesis
 
 logger = logging.getLogger(__name__)
 
-INITIAL_CONFIDENCE = 0.3
-CROSS_VALIDATION_THRESHOLD = 0.6
-EXPLOITATION_THRESHOLD = 0.75
+# Offensive thresholds — a real pentester tries everything
+CROSS_VALIDATION_THRESHOLD = 0.5
+EXPLOITATION_THRESHOLD = 0.5
 
 
 class BeliefRefinementLoop:
     """Manages the hypothesis confidence lifecycle.
 
-    Hypotheses start at 0.3 baseline, scouts investigate,
-    cross-validator challenges, confirmed >0.75 go to exploitation.
+    Offensive mode: Scout investigates, then we go straight to
+    exploitation. Cross-validation is optional and advisory only
+    — it can never veto an exploit attempt.
     """
 
     def update_belief(
@@ -29,18 +30,13 @@ class BeliefRefinementLoop:
     ) -> float:
         """Update hypothesis confidence based on scout findings.
 
-        Args:
-            hypothesis: The hypothesis to update
-            scout_confidence: Scout's assessed confidence (0.0-1.0)
-            evidence_strength: How strong the supporting evidence is (0.0-1.0)
-
-        Returns:
-            Updated confidence value
+        Weighting: 60% scout, 20% prior (strategist), 20% evidence.
+        Heavy scout weight because the scout actually analyzed the
+        target. If scout says it's likely, we try it.
         """
-        # Weighted average: 40% prior, 40% scout, 20% evidence
         new_confidence = (
-            hypothesis.confidence * 0.4
-            + scout_confidence * 0.4
+            hypothesis.confidence * 0.2
+            + scout_confidence * 0.6
             + evidence_strength * 0.2
         )
         hypothesis.confidence = max(0.0, min(1.0, new_confidence))
@@ -53,22 +49,34 @@ class BeliefRefinementLoop:
     ) -> float:
         """Reconcile with cross-validator's assessment.
 
-        The cross-validator is an independent model that challenges findings.
-        If it disagrees significantly, confidence is reduced.
+        Advisory only — the validator can adjust confidence but
+        can NEVER drop it below 80% of the current value. This
+        prevents an overly skeptical validator from killing valid
+        hypotheses.
         """
+        floor = hypothesis.confidence * 0.80
         diff = abs(hypothesis.confidence - validator_confidence)
 
         if diff < 0.15:
-            # Agreement — slight boost
-            adjusted = (hypothesis.confidence + validator_confidence) / 2 + 0.05
+            adjusted = (
+                (hypothesis.confidence + validator_confidence) / 2
+                + 0.05
+            )
         elif validator_confidence < hypothesis.confidence:
-            # Validator is more skeptical — reduce confidence
-            adjusted = (hypothesis.confidence * 0.4 + validator_confidence * 0.6)
+            # Validator is more skeptical — mild reduction only
+            adjusted = (
+                hypothesis.confidence * 0.7
+                + validator_confidence * 0.3
+            )
         else:
-            # Validator is more confident — moderate boost
-            adjusted = (hypothesis.confidence * 0.6 + validator_confidence * 0.4)
+            # Validator is more confident — boost
+            adjusted = (
+                hypothesis.confidence * 0.5
+                + validator_confidence * 0.5
+            )
 
-        hypothesis.confidence = max(0.0, min(1.0, adjusted))
+        adjusted = max(floor, min(1.0, adjusted))
+        hypothesis.confidence = adjusted
         return hypothesis.confidence
 
     def apply_exploitation_result(
@@ -82,28 +90,34 @@ class BeliefRefinementLoop:
             hypothesis.confidence = 1.0
             hypothesis.confirmed = True
         elif blocked:
-            # Blocked doesn't mean vuln doesn't exist — slight reduction
             hypothesis.confidence *= 0.9
         else:
-            # Failed exploitation — significant reduction
             hypothesis.confidence *= 0.7
 
         hypothesis.exploitation_attempted = True
         return hypothesis.confidence
 
-    def is_ready_for_cross_validation(self, hypothesis: Hypothesis) -> bool:
+    def is_ready_for_cross_validation(
+        self, hypothesis: Hypothesis
+    ) -> bool:
         return hypothesis.confidence > CROSS_VALIDATION_THRESHOLD
 
-    def is_ready_for_exploitation(self, hypothesis: Hypothesis) -> bool:
+    def is_ready_for_exploitation(
+        self, hypothesis: Hypothesis
+    ) -> bool:
         return hypothesis.confidence > EXPLOITATION_THRESHOLD
 
     @staticmethod
     def parse_confidence_from_llm(text: str) -> float | None:
-        """Extract a confidence value from LLM response text."""
+        """Extract a confidence value from LLM response text.
+
+        Handles: "confidence: 0.85", "Confidence: 85%",
+        "0.85/1.0", "8/10", "rating: 0.9", "85% confident"
+        """
         patterns = [
-            r"confidence[:\s]+([0-9]*\.?[0-9]+)",
+            r"confidence[:\s]*\**\s*([0-9]*\.?[0-9]+)",
             r"([0-9]*\.?[0-9]+)\s*/\s*1\.0",
-            r"rating[:\s]+([0-9]*\.?[0-9]+)",
+            r"rating[:\s]*\**\s*([0-9]*\.?[0-9]+)",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, re.I)
@@ -111,4 +125,26 @@ class BeliefRefinementLoop:
                 val = float(match.group(1))
                 if 0.0 <= val <= 1.0:
                     return val
+
+        # Try percentage: "85%" or "85 percent"
+        pct_match = re.search(
+            r"(\d{1,3})\s*(?:%|percent)",
+            text,
+            re.I,
+        )
+        if pct_match:
+            val = int(pct_match.group(1))
+            if 0 <= val <= 100:
+                return val / 100.0
+
+        # Try X/10 scale
+        scale_match = re.search(
+            r"(\d(?:\.\d)?)\s*/\s*10",
+            text,
+        )
+        if scale_match:
+            val = float(scale_match.group(1))
+            if 0.0 <= val <= 10.0:
+                return val / 10.0
+
         return None
