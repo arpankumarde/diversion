@@ -47,6 +47,7 @@ class Hypothesis(BaseModel):
     confidence: float = 0.3  # Starting baseline per PRD
     target_endpoint: str = ""
     target_parameter: str = ""
+    http_method: str = ""  # GET, POST — from LLM hypothesis
     evidence: list[Evidence] = Field(default_factory=list)
     owasp_category: str = ""
     cwe_id: str = ""

@@ -119,6 +119,11 @@ class Strategist(BaseAgent):
                             },
                             "vuln_type": {
                                 "type": "string",
+                                "description": (
+                                    "Vulnerability class: sqli, xss, "
+                                    "cmdi, idor, ssrf, csrf, "
+                                    "path_traversal, etc."
+                                ),
                             },
                             "severity": {
                                 "type": "string",
@@ -135,9 +140,29 @@ class Strategist(BaseAgent):
                             },
                             "target_endpoint": {
                                 "type": "string",
+                                "description": (
+                                    "URL path only, e.g. "
+                                    "/vulnerabilities/exec/ — "
+                                    "do NOT include scheme, host, "
+                                    "port, or HTTP method"
+                                ),
                             },
                             "target_parameter": {
                                 "type": "string",
+                                "description": (
+                                    "The vulnerable parameter name, "
+                                    "e.g. id, ip, username"
+                                ),
+                            },
+                            "http_method": {
+                                "type": "string",
+                                "description": (
+                                    "HTTP method: GET or POST"
+                                ),
+                                "enum": [
+                                    "GET",
+                                    "POST",
+                                ],
                             },
                             "owasp_category": {
                                 "type": "string",
@@ -153,6 +178,7 @@ class Strategist(BaseAgent):
                             "confidence",
                             "target_endpoint",
                             "target_parameter",
+                            "http_method",
                             "owasp_category",
                             "cwe_id",
                         ],
@@ -175,11 +201,18 @@ class Strategist(BaseAgent):
             f"Knowledge graph:\n{sanitized}\n\n"
             "Generate vulnerability hypotheses as JSON. "
             "Be aggressive with confidence — 0.8+ if any "
-            "basis exists. "
-            "For each: id, title, description, vuln_type, "
-            "severity (critical/high/medium/low/info), "
-            "confidence (0.0-1.0), target_endpoint, "
-            "target_parameter, owasp_category, cwe_id.",
+            "basis exists.\n\n"
+            "IMPORTANT field rules:\n"
+            "- target_endpoint: URL PATH ONLY "
+            "(e.g. /vulnerabilities/exec/). "
+            "Do NOT include scheme, host, port, or HTTP method.\n"
+            "- http_method: GET or POST (the HTTP method to use)\n"
+            "- target_parameter: the vulnerable parameter name "
+            "(e.g. id, ip, username)\n"
+            "- vuln_type: sqli, xss, cmdi, idor, ssrf, csrf, "
+            "path_traversal, etc.\n"
+            "- severity: critical/high/medium/low/info\n"
+            "- confidence: 0.0-1.0",
             structured_output=self.HYPOTHESES_SCHEMA,
         )
         return self._parse_hypotheses(raw)
@@ -202,6 +235,29 @@ class Strategist(BaseAgent):
                     severity = Severity(sev_str.lower())
                 except ValueError:
                     severity = Severity.MEDIUM
+                endpoint_raw = item.get(
+                    "target_endpoint", ""
+                )
+                # Clean endpoint: strip HTTP method prefix
+                # and extract path only
+                endpoint_raw = re.sub(
+                    r"^(GET|POST|PUT|DELETE|PATCH|HEAD"
+                    r"|OPTIONS)\s+",
+                    "",
+                    endpoint_raw.strip(),
+                    flags=re.IGNORECASE,
+                )
+                # Strip scheme+host if LLM included full URL
+                ep_parsed = urlparse(endpoint_raw)
+                if ep_parsed.scheme and ep_parsed.netloc:
+                    endpoint_clean = ep_parsed.path or "/"
+                    if ep_parsed.query:
+                        endpoint_clean += (
+                            f"?{ep_parsed.query}"
+                        )
+                else:
+                    endpoint_clean = endpoint_raw
+
                 hypotheses.append(
                     Hypothesis(
                         id=item.get(
@@ -217,12 +273,13 @@ class Strategist(BaseAgent):
                         confidence=float(
                             item.get("confidence", 0.8)
                         ),
-                        target_endpoint=item.get(
-                            "target_endpoint", ""
-                        ),
+                        target_endpoint=endpoint_clean,
                         target_parameter=item.get(
                             "target_parameter", ""
                         ),
+                        http_method=item.get(
+                            "http_method", ""
+                        ).upper(),
                         owasp_category=item.get(
                             "owasp_category", ""
                         ),
@@ -264,7 +321,22 @@ class Strategist(BaseAgent):
             vuln_type = _extract("Vulnerability Type")
             owasp = _extract("OWASP Category")
             cwe = _extract("CWE")
-            endpoint = _extract("Target")
+            endpoint_raw = _extract("Target")
+            # Clean: strip method prefix and extract path
+            endpoint_raw = re.sub(
+                r"^(GET|POST|PUT|DELETE|PATCH|HEAD"
+                r"|OPTIONS)\s+",
+                "",
+                endpoint_raw.strip(),
+                flags=re.IGNORECASE,
+            )
+            ep_parsed = urlparse(endpoint_raw)
+            if ep_parsed.scheme and ep_parsed.netloc:
+                endpoint = ep_parsed.path or "/"
+                if ep_parsed.query:
+                    endpoint += f"?{ep_parsed.query}"
+            else:
+                endpoint = endpoint_raw
             sev_raw = (
                 _extract("Estimated Severity")
                 or _extract("Severity")

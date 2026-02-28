@@ -513,9 +513,25 @@ class Orchestrator:
                 h_dict = h.model_dump(mode="json")
 
                 try:
+                    # Determine HTTP method(s) from hypothesis
+                    h_method_str = h_dict.get(
+                        "http_method", ""
+                    ).upper()
+                    if h_method_str == "POST":
+                        exploit_methods = (HttpMethod.POST,)
+                    elif h_method_str == "GET":
+                        exploit_methods = (HttpMethod.GET,)
+                    else:
+                        # Unknown — try both
+                        exploit_methods = (
+                            HttpMethod.GET,
+                            HttpMethod.POST,
+                        )
+
                     # ── Baseline ──
                     template = ExploitPlanner.build_strategy(
-                        h_dict, "1", target_url, HttpMethod.GET,
+                        h_dict, "1", target_url,
+                        exploit_methods[0],
                     )
                     baseline = await engine.get_baseline(
                         template, cookies or None,
@@ -571,10 +587,7 @@ class Orchestrator:
                         for payload in payloads:
                             if confirmed:
                                 break
-                            for method in (
-                                HttpMethod.GET,
-                                HttpMethod.POST,
-                            ):
+                            for method in exploit_methods:
                                 if confirmed:
                                     break
                                 s = (
