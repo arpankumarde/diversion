@@ -140,7 +140,7 @@ class ReportGenerator:
         """Render HTML report from Jinja2 template."""
         env = Environment(
             loader=FileSystemLoader(str(TEMPLATE_DIR)),
-            autoescape=select_autoescape(["html"]),
+            autoescape=select_autoescape(["html", "html.j2", "j2"]),
         )
 
         try:
