@@ -1,0 +1,7 @@
+.ruff_cache
+.pytest_cache
+.claude
+.venv
+nazitest_runs
+*.pyc
+.env

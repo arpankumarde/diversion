@@ -1,0 +1,50 @@
+# NAZITEST LLM Model Configuration
+# Models are accessed via OpenRouter API (https://openrouter.ai/api/v1)
+
+models:
+  graph_builder:
+    id: "google/gemini-3-flash-preview"
+    temperature: 0.2
+    max_tokens: 8192
+    description: "Largest context (1M+) for ingesting full recon data"
+
+  strategist:
+    id: "anthropic/claude-opus-4.6"
+    temperature: 0.3
+    max_tokens: 8192
+    description: "Strongest reasoning for hypothesis generation"
+
+  scout:
+    id: "deepseek/deepseek-v3.2"
+    temperature: 0.3
+    max_tokens: 4096
+    description: "Cost-effective exploratory analysis"
+
+  exploit_planner:
+    id: "anthropic/claude-sonnet-4.6"
+    temperature: 0.2
+    max_tokens: 8192
+    description: "Agentic coding for exploit generation"
+
+  cross_validator:
+    id: "x-ai/grok-4.1-fast"
+    temperature: 0.3
+    max_tokens: 4096
+    description: "Independent model family for unbiased cross-validation"
+
+  codebase_analyzer:
+    id: "deepseek/deepseek-v3.2"
+    temperature: 0.2
+    max_tokens: 8192
+    description: "Strong code understanding at low cost"
+
+  report_writer:
+    id: "anthropic/claude-sonnet-4.6"
+    temperature: 0.4
+    max_tokens: 8192
+    description: "Executive summary and report generation"
+
+# Budget controls
+budget:
+  max_cost_per_run_usd: 10.0
+  warn_at_usd: 7.5
