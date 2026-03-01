@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+import httpx
 import orjson
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -222,6 +225,189 @@ async def list_reports() -> list[ReportItem]:
             logger.warning("Failed to read report for %s: %s", run_id, e)
 
     return reports
+
+
+# ── Attack Narrative (Opus deep analysis) ──
+
+ATTACK_NARRATIVE_MODEL = "anthropic/claude-opus-4.6"
+ATTACK_NARRATIVE_TIMEOUT = 600  # 10 minutes
+
+ATTACK_NARRATIVE_PROMPT = """You are an elite red team operator writing an internal debrief after a successful penetration test. You have been given the complete scan results — every vulnerability found, every exploit attempted, every confirmed finding with proof-of-concept evidence.
+
+Your job: write a detailed, realistic ATTACK NARRATIVE describing exactly how a real-world attacker would chain these vulnerabilities together to cause maximum damage. This is not a compliance report — this is a war story.
+
+Think step by step:
+
+1. **Initial Access** — Which vulnerability gets the attacker in the door? What's the easiest entry point? Walk through the exact HTTP requests, payloads, and responses.
+
+2. **Privilege Escalation** — Once inside, how does the attacker escalate? Can they go from anonymous → authenticated → admin? Chain the confirmed vulns.
+
+3. **Data Exfiltration** — What sensitive data can they steal? Database dumps via SQLi? Session tokens via XSS? Internal files via path traversal? Be specific about what tables, what files, what tokens.
+
+4. **Lateral Movement** — Can they pivot? SSRF to internal services? Credential reuse? Cloud metadata access?
+
+5. **Persistence** — How would they maintain access? Backdoor accounts? Modified application code? Scheduled tasks?
+
+6. **Impact Assessment** — What's the worst-case business impact? Data breach? Ransomware deployment? Supply chain compromise? Financial fraud?
+
+For each step:
+- Reference the SPECIFIC vulnerabilities from the scan by ID and endpoint
+- Include the ACTUAL payloads and curl commands that would work
+- Describe what the attacker sees at each stage
+- Estimate the time an experienced attacker would need
+
+End with:
+- **Attack Timeline** — minute-by-minute breakdown of the full attack chain
+- **Crown Jewels at Risk** — the most valuable assets the attacker could reach
+- **What Would Make Headlines** — the worst-case scenario if this were exploited in the wild
+
+Be thorough. Be creative. Be evil. This is what keeps CISOs up at night."""
+
+
+class AttackNarrativeResponse(BaseModel):
+    run_id: str
+    target: str
+    model: str
+    narrative: str
+    usage: dict[str, Any] = {}
+
+
+@app.post("/api/reports/{run_id}/attack-narrative", response_model=AttackNarrativeResponse)
+async def generate_attack_narrative(run_id: str) -> AttackNarrativeResponse:
+    """Generate a deep-think attack narrative from a completed scan using Opus.
+
+    Loads the full report data, POCs, and metadata, sends it all to Claude Opus
+    with extended context, and returns a realistic attack scenario narrative.
+    Timeout: 10 minutes.
+    """
+    settings = Settings.load()
+
+    if not settings.openrouter_api_key:
+        raise HTTPException(status_code=500, detail="No OPENROUTER_API_KEY configured")
+
+    run_path = RUNS_DIR / run_id
+    if not run_path.exists():
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+
+    report_path = run_path / "report" / "report.json"
+    if not report_path.exists():
+        raise HTTPException(status_code=400, detail="Scan not complete — no report.json found")
+
+    # Load all available data
+    report_data = orjson.loads(report_path.read_bytes())
+    target = report_data.get("metadata", {}).get("target_url", "unknown")
+
+    meta_data = {}
+    meta_path = run_path / "report" / "meta.json"
+    if meta_path.exists():
+        meta_data = orjson.loads(meta_path.read_bytes())
+
+    # Load POCs
+    pocs: list[dict] = []
+    poc_dir = run_path / "exploitation" / "pocs"
+    if poc_dir.exists():
+        for poc_file in sorted(poc_dir.glob("*.json")):
+            try:
+                pocs.append(orjson.loads(poc_file.read_bytes()))
+            except Exception:
+                pass
+
+    # Load exploit attempts (summarized)
+    attempts: list[dict] = []
+    attempts_dir = run_path / "exploitation" / "attempts"
+    if attempts_dir.exists():
+        for att_file in sorted(attempts_dir.glob("*.json"))[:50]:  # cap at 50
+            try:
+                attempts.append(orjson.loads(att_file.read_bytes()))
+            except Exception:
+                pass
+
+    # Build the context payload for Opus
+    context = json.dumps({
+        "target": target,
+        "run_id": run_id,
+        "summary": report_data.get("summary", {}),
+        "vulnerabilities": report_data.get("vulnerabilities", []),
+        "graph_stats": report_data.get("graph_stats", {}),
+        "proof_of_concepts": pocs,
+        "exploit_attempts_sample": attempts[:30],
+        "scan_metadata": {
+            k: v for k, v in meta_data.items()
+            if k in ("target_url", "total_elapsed_seconds", "stages",
+                      "network", "knowledge_graph", "iterative_pipeline")
+        },
+    }, indent=2)
+
+    user_message = (
+        f"Here is the complete penetration test data for {target}:\n\n"
+        f"{context}\n\n"
+        "Now write the attack narrative. Be specific, reference actual "
+        "vulnerability IDs and endpoints from the data above. Include "
+        "real curl commands using the confirmed payloads."
+    )
+
+    # Call Opus via OpenRouter with extended timeout
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(ATTACK_NARRATIVE_TIMEOUT, connect=15.0),
+        headers={
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "HTTP-Referer": "https://nazitest.local",
+            "X-Title": "NAZITEST Attack Narrative",
+            "Content-Type": "application/json",
+        },
+    ) as client:
+        payload = {
+            "model": ATTACK_NARRATIVE_MODEL,
+            "messages": [
+                {"role": "system", "content": ATTACK_NARRATIVE_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 16384,
+        }
+
+        try:
+            response = await client.post(
+                f"{settings.openrouter_base_url}/chat/completions",
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=504,
+                detail="Opus timed out — the narrative generation exceeded 10 minutes",
+            )
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"OpenRouter API error: {e.response.text[:500]}",
+            )
+
+    choices = data.get("choices", [])
+    narrative = choices[0]["message"]["content"] if choices else "No response generated."
+    usage = data.get("usage", {})
+    model_used = data.get("model", ATTACK_NARRATIVE_MODEL)
+
+    # Save the narrative to disk alongside the report
+    narrative_path = run_path / "report" / "attack_narrative.md"
+    narrative_path.write_text(narrative)
+
+    narrative_meta_path = run_path / "report" / "attack_narrative_meta.json"
+    narrative_meta_path.write_bytes(orjson.dumps({
+        "model": model_used,
+        "usage": usage,
+        "target": target,
+        "run_id": run_id,
+    }, option=orjson.OPT_INDENT_2))
+
+    return AttackNarrativeResponse(
+        run_id=run_id,
+        target=target,
+        model=model_used,
+        narrative=narrative,
+        usage=usage,
+    )
 
 
 # Mount static files AFTER API routes so /api/* paths aren't intercepted
