@@ -20,6 +20,7 @@ import {
 } from "@/app/landing-data";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
+import Image from "next/image";
 
 const sectionCls = "py-24 border-t border-white/5";
 const headingCls = "text-3xl font-bold text-white mb-4";
@@ -32,7 +33,12 @@ export function LandingNav() {
     <nav className="sticky top-0 z-10 border-b border-white/5 bg-slate-950/50 backdrop-blur-md">
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         <div className="flex items-center gap-2 text-teal-400 font-mono font-bold tracking-wider text-xl">
-          <ShieldAlert className="w-6 h-6 text-teal-500" />
+          <Image
+            src="/brand/logo.png"
+            alt="Logo"
+            width={20}
+            height={20}
+          />
           <span>NAZITEST</span>
         </div>
         <div className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">

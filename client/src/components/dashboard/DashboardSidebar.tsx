@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import Image from "next/image";
 import {
   LayoutDashboard,
   FileText,
@@ -35,6 +36,14 @@ export function DashboardSidebar() {
     <Sidebar collapsible="icon">
       <SidebarHeader className="h-14 border-b border-sidebar-border">
         <Link href="/dashboard" className="flex items-center gap-2 px-2 py-2">
+          <div className="flex items-center justify-center">
+            <Image
+              src="/brand/logo.png"
+              alt="Logo"
+              width={20}
+              height={20}
+            />
+          </div>
           <span className="font-semibold text-sm group-data-[collapsible=icon]:hidden">
             NAZITEST
           </span>
@@ -51,7 +60,7 @@ export function DashboardSidebar() {
                     isActive={
                       pathname === href || pathname.startsWith(href + "/")
                     }
-                    // tooltip={label}
+                  // tooltip={label}
                   >
                     <Link href={href}>
                       <Icon className="size-4" />
