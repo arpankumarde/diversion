@@ -1,31 +1,44 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ExternalLink, ArrowLeft } from "lucide-react";
 import { ReportDetailTabs } from "@/components/reports/ReportDetailTabs";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+
 async function getReportDetails(id: string) {
-  const base =
-    process.env.APP_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_BASE_URL ||
-    "http://localhost:3000";
-  const res = await fetch(`${base}/api/reports/${id}`, { cache: "no-store" });
-  if (!res.ok) return null;
-  return res.json();
+  const base = API_BASE.replace(/\/$/, "");
+  if (!base || !base.startsWith("http")) return null;
+
+  const [reportRes, metaRes, configRes] = await Promise.all([
+    fetch(`${base}/runs/${id}/report/report.json`, { cache: "force-cache" }),
+    fetch(`${base}/runs/${id}/report/meta.json`, { cache: "force-cache" }),
+    fetch(`${base}/runs/${id}/config.json`, { cache: "force-cache" }),
+  ]);
+
+  const report = reportRes.ok ? await reportRes.json() : null;
+  const meta = metaRes.ok ? await metaRes.json() : null;
+  const config = configRes.ok ? await configRes.json() : null;
+
+  if (!report && !meta) return null;
+  return { report, meta, config };
 }
 
-function getReportHtmlUrl(id: string): string {
-  const reportsBase = process.env.NEXT_PUBLIC_REPORTS_BASE_URL;
-  const appBase =
-    process.env.APP_BASE_URL ||
-    process.env.NEXT_PUBLIC_APP_BASE_URL ||
-    "http://localhost:3000";
+export function getReportHtmlUrl(id: string): string {
+  const base = API_BASE.replace(/\/$/, "");
+  if (!base || !base.startsWith("http")) return "";
+  return `${base}/runs/${id}/report/report.html`;
+}
 
-  if (reportsBase && reportsBase.startsWith("http")) {
-    return `${reportsBase.replace(/\/$/, "")}/${id}/report/report.html`;
-  }
-  return `${appBase.replace(/\/$/, "")}/api/reports-static/${id}/report/report.html`;
+function getAttackNarrativeProxyUrl(id: string): string {
+  return `/api/reports/${id}/attack-narrative`;
 }
 
 export default async function ReportDetailPage({
@@ -40,6 +53,7 @@ export default async function ReportDetailPage({
 
   const { report, meta, config } = data;
   const reportHtmlUrl = getReportHtmlUrl(id);
+  const attackNarrativeUrl = getAttackNarrativeProxyUrl(id);
 
   const metadata = report?.metadata || meta;
   const summary = report?.summary;
@@ -64,17 +78,23 @@ export default async function ReportDetailPage({
           )}
         </div>
         <Button asChild size="lg">
-          <a href={reportHtmlUrl} target="_blank" rel="noopener noreferrer">
+          <Link
+            href={`/dashboard/reports/${id}/full`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             View full report
             <ExternalLink className="size-4" />
-          </a>
+          </Link>
         </Button>
       </div>
 
       <ReportDetailTabs
+        reportId={id}
         summary={summary}
         vulnerabilities={vulnerabilities}
         reportHtmlUrl={reportHtmlUrl}
+        attackNarrativeUrl={attackNarrativeUrl}
       />
 
       {(meta || config) && (
@@ -106,7 +126,9 @@ export default async function ReportDetailPage({
                 )}
                 {meta.network && (
                   <p>
-                    <span className="text-muted-foreground">Pages captured:</span>{" "}
+                    <span className="text-muted-foreground">
+                      Pages captured:
+                    </span>{" "}
                     {meta.network.recon_pages_captured}
                   </p>
                 )}

@@ -3,7 +3,8 @@ import { readFile } from "fs/promises";
 import path from "path";
 
 const REPORTS_SOURCE = process.env.REPORTS_SOURCE || "local";
-const REPORTS_API_URL = process.env.REPORTS_API_URL || "";
+const REPORTS_API_URL =
+  process.env.REPORTS_API_URL || process.env.NEXT_PUBLIC_API_URL || "";
 const NAZITEST_RUNS_PATH = path.join(process.cwd(), "..", "nazitest_runs");
 
 function isValidId(id: string): boolean {
@@ -20,11 +21,13 @@ export async function GET(
   }
 
   try {
+    // Remote: API serves /runs/<RUNID>/* with same folder structure as nazitest_runs
     if (REPORTS_SOURCE === "remote" && REPORTS_API_URL) {
+      const base = REPORTS_API_URL.replace(/\/$/, "");
       const [reportRes, metaRes, configRes] = await Promise.all([
-        fetch(`${REPORTS_API_URL}/reports/${id}/report/report.json`),
-        fetch(`${REPORTS_API_URL}/reports/${id}/report/meta.json`),
-        fetch(`${REPORTS_API_URL}/reports/${id}/config.json`),
+        fetch(`${base}/runs/${id}/report/report.json`),
+        fetch(`${base}/runs/${id}/report/meta.json`),
+        fetch(`${base}/runs/${id}/config.json`),
       ]);
 
       const report = reportRes.ok ? await reportRes.json() : null;

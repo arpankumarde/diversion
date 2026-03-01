@@ -3,7 +3,8 @@ import { readdir, readFile } from "fs/promises";
 import path from "path";
 
 const REPORTS_SOURCE = process.env.REPORTS_SOURCE || "local";
-const REPORTS_API_URL = process.env.REPORTS_API_URL || "";
+const REPORTS_API_URL =
+  process.env.REPORTS_API_URL || process.env.NEXT_PUBLIC_API_URL || "";
 const NAZITEST_RUNS_PATH = path.join(process.cwd(), "..", "nazitest_runs");
 
 export async function GET(req: NextRequest) {
@@ -12,7 +13,8 @@ export async function GET(req: NextRequest) {
     const withSummary = searchParams.get("summary") === "1";
 
     if (REPORTS_SOURCE === "remote" && REPORTS_API_URL) {
-      const res = await fetch(`${REPORTS_API_URL}/reports`);
+      const base = REPORTS_API_URL.replace(/\/$/, "");
+      const res = await fetch(`${base}/runs`);
       if (!res.ok) throw new Error("Failed to fetch reports from remote");
       const data = await res.json();
       return NextResponse.json(data);

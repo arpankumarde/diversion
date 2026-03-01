@@ -34,19 +34,19 @@ const ENVIRONMENT_TAGS = [
     value: "DEVELOPMENT",
     label: "Development",
     color: "bg-sky-400",
-    theme: "bg-sky-400/10 text-sky-400 border-sky-400/20"
+    theme: "bg-sky-400/10 text-sky-400 border-sky-400/20",
   },
   {
     value: "STAGING",
     label: "Staging",
     color: "bg-amber-500",
-    theme: "bg-amber-500/10 text-amber-500 border-amber-500/20"
+    theme: "bg-amber-500/10 text-amber-500 border-amber-500/20",
   },
   {
     value: "PRODUCTION",
     label: "Production",
     color: "bg-emerald-500",
-    theme: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
+    theme: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
   },
 ] as const;
 
@@ -57,6 +57,7 @@ interface Environment {
   name: string;
   tag: EnvironmentTag;
   endpoint: string;
+  repo: string;
 }
 
 const HARDCODED_ENVIRONMENTS: Environment[] = [
@@ -64,55 +65,48 @@ const HARDCODED_ENVIRONMENTS: Environment[] = [
     id: "1",
     name: "dev-aws-1",
     tag: "DEVELOPMENT",
-    endpoint: "https://api.dev.example.com/v1",
+    endpoint: "https://pentest-ground.com:4280",
+    repo: "",
   },
   {
     id: "2",
     name: "staging-eu-1",
     tag: "STAGING",
-    endpoint: "https://api.staging.example.com/v1",
+    endpoint: "https://juice.obvix.cloud",
+    repo: "https://github.com/juice-shop/juice-shop",
   },
   {
     id: "3",
     name: "prod-us-east-1",
     tag: "PRODUCTION",
     endpoint: "https://api.example.com/v1",
+    repo: "",
   },
   {
     id: "4",
     name: "dev-local",
     tag: "DEVELOPMENT",
     endpoint: "http://localhost:3000/api",
+    repo: "",
   },
   {
     id: "5",
     name: "staging-aws-2",
     tag: "STAGING",
     endpoint: "https://api.staging-2.example.com/v1",
+    repo: "",
   },
 ];
 
-function getTagVariant(
-  tag: EnvironmentTag
-): "default" | "secondary" | "destructive" | "outline" {
-  switch (tag) {
-    case "PRODUCTION":
-      return "destructive";
-    case "STAGING":
-      return "secondary";
-    case "DEVELOPMENT":
-    default:
-      return "outline";
-  }
-}
-
 export default function EnvironmentsPage() {
-  const [environments, setEnvironments] =
-    useState<Environment[]>(HARDCODED_ENVIRONMENTS);
+  const [environments, setEnvironments] = useState<Environment[]>(
+    HARDCODED_ENVIRONMENTS,
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [formName, setFormName] = useState("");
   const [formTag, setFormTag] = useState<EnvironmentTag>("DEVELOPMENT");
   const [formEndpoint, setFormEndpoint] = useState("");
+  const [formRepo, setFormRepo] = useState("");
 
   const handleAddEnvironment = () => {
     if (!formName.trim() || !formEndpoint.trim()) return;
@@ -129,6 +123,7 @@ export default function EnvironmentsPage() {
       name: formName.trim(),
       tag: formTag,
       endpoint: formEndpoint.trim(),
+      repo: formRepo.trim(),
     };
     setEnvironments((prev) => [...prev, newEnv]);
     setFormName("");
@@ -210,6 +205,16 @@ export default function EnvironmentsPage() {
                   onChange={(e) => setFormEndpoint(e.target.value)}
                 />
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="env-repo">Repository</Label>
+                <Input
+                  id="env-repo"
+                  type="url"
+                  placeholder="https://github.com/juice-shop/juice-shop"
+                  value={formRepo}
+                  onChange={(e) => setFormRepo(e.target.value)}
+                />
+              </div>
               <Button
                 className="w-full"
                 onClick={handleAddEnvironment}
@@ -224,19 +229,26 @@ export default function EnvironmentsPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {environments.map((env) => (
-          <Card key={env.id} className="bg-muted/30 border-sidebar-border/50 hover:bg-muted/50 hover:border-sidebar-ring/50 transition-colors shadow-sm">
+          <Card
+            key={env.id}
+            className="bg-muted/30 border-sidebar-border/50 hover:bg-muted/50 hover:border-sidebar-ring/50 transition-colors shadow-sm"
+          >
             <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
               <div className="space-y-1">
                 <CardTitle className="text-base">{env.name}</CardTitle>
                 <div className="flex items-center gap-2">
                   {(() => {
-                    const tagInfo = ENVIRONMENT_TAGS.find((t) => t.value === env.tag);
+                    const tagInfo = ENVIRONMENT_TAGS.find(
+                      (t) => t.value === env.tag,
+                    );
                     return (
                       <Badge
                         variant="outline"
                         className={`text-[10px] uppercase tracking-wider h-5 gap-1.5 px-2 font-semibold border-none ${tagInfo?.theme}`}
                       >
-                        <div className={`h-1.5 w-1.5 rounded-full shrink-0 ${tagInfo?.color}`} />
+                        <div
+                          className={`h-1.5 w-1.5 rounded-full shrink-0 ${tagInfo?.color}`}
+                        />
                         {env.tag}
                       </Badge>
                     );

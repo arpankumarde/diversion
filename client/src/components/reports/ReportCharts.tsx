@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo } from "react";
+import { hierarchy, pack } from "d3-hierarchy";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { ChartContainer, ChartTooltipContent } from "@/components/ui/chart";
 
@@ -35,6 +37,77 @@ function aggregateByKey(items: VulnItem[], key: "vuln_type" | "severity") {
   return Object.entries(counts).map(([name, value]) => ({ name, value }));
 }
 
+type PackedNode = { x: number; y: number; r: number; data: { name: string; value: number } };
+
+function PackedBubbleChart({
+  data,
+  colors,
+  width,
+  height,
+}: {
+  data: { name: string; value: number }[];
+  colors: string[];
+  width: number;
+  height: number;
+}) {
+  const nodes = useMemo(() => {
+    if (data.length === 0) return [];
+    type DataNode = { name: string; value: number };
+    const getValue = (d: unknown): number =>
+      typeof d === "object" && d !== null && "value" in d && typeof (d as DataNode).value === "number"
+        ? (d as DataNode).value
+        : 0;
+    const root = hierarchy<{ children: DataNode[] }>({ children: data })
+      .sum(getValue)
+      .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+    pack<{ children: DataNode[] }>()
+      .size([width, height])
+      .padding(4)(root);
+    return root.leaves() as unknown as PackedNode[];
+  }, [data, width, height]);
+
+  if (nodes.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        No data
+      </div>
+    );
+  }
+
+  const padding = 8;
+
+  return (
+    <svg
+      viewBox={`${-padding} ${-padding} ${width + padding * 2} ${height + padding * 2}`}
+      className="h-full w-full text-foreground"
+      preserveAspectRatio="xMidYMid meet"
+    >
+      {nodes.map((node, i) => (
+        <g key={node.data.name} transform={`translate(${node.x},${node.y})`}>
+          <circle
+            r={node.r}
+            fill={colors[i % colors.length]}
+            fillOpacity={0.85}
+            stroke="white"
+            strokeWidth={1.5}
+          />
+          <text
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fill="currentColor"
+            className="text-sm font-medium"
+            style={{
+              fontSize: Math.max(10, Math.min(14, node.r * 0.6)),
+            }}
+          >
+            {node.data.name}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 export function ReportCharts({ vulnerabilities }: { vulnerabilities: VulnItem[] }) {
   const byType = aggregateByKey(vulnerabilities, "vuln_type");
   const bySeverity = aggregateByKey(vulnerabilities, "severity");
@@ -52,29 +125,14 @@ export function ReportCharts({ vulnerabilities }: { vulnerabilities: VulnItem[] 
         config={typeConfig}
         className="h-[280px] w-full"
       >
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={byType}
-              dataKey="value"
-              nameKey="name"
-              cx="50%"
-              cy="50%"
-              innerRadius={50}
-              outerRadius={100}
-              paddingAngle={2}
-              label={({ name, percent }) =>
-                `${name} (${(percent * 100).toFixed(0)}%)`
-              }
-            >
-              {byType.map((_, i) => (
-                <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-              ))}
-            </Pie>
-            <Tooltip content={<ChartTooltipContent hideLabel />} />
-            <Legend />
-          </PieChart>
-        </ResponsiveContainer>
+        <div className="h-full w-full min-h-[200px]">
+          <PackedBubbleChart
+            data={byType}
+            colors={PIE_COLORS}
+            width={400}
+            height={260}
+          />
+        </div>
       </ChartContainer>
 
       <ChartContainer

@@ -25,6 +25,8 @@ import {
 const navItems = [
   { href: "/dashboard/home", label: "Dashboard", icon: LayoutDashboard },
   { href: "/dashboard/reports", label: "Reports", icon: FileText },
+  { href: "/dashboard/benchmark", label: "Benchmark", icon: FileText },
+  { href: "/dashboard/trails", label: "Audit Trails", icon: FileText },
   { href: "/dashboard/environments", label: "Environments", icon: Server },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ] as const;
@@ -37,12 +39,7 @@ export function DashboardSidebar() {
       <SidebarHeader className="h-14 border-b border-sidebar-border">
         <Link href="/dashboard" className="flex items-center gap-2 px-2 py-2">
           <div className="flex items-center justify-center">
-            <Image
-              src="/brand/logo.png"
-              alt="Logo"
-              width={20}
-              height={20}
-            />
+            <Image src="/brand/logo.png" alt="Logo" width={20} height={20} />
           </div>
           <span className="font-semibold text-sm group-data-[collapsible=icon]:hidden">
             NAZITEST
@@ -60,7 +57,7 @@ export function DashboardSidebar() {
                     isActive={
                       pathname === href || pathname.startsWith(href + "/")
                     }
-                  // tooltip={label}
+                    // tooltip={label}
                   >
                     <Link href={href}>
                       <Icon className="size-4" />
