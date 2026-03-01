@@ -1,0 +1,32 @@
+{
+  "target": "OWASP Juice Shop",
+  "version": "v19.1.1",
+  "total_challenges": 110,
+  "source": "https://owasp.org/www-project-juice-shop/",
+  "categories": {
+    "Sensitive Data Exposure": 15,
+    "Improper Input Validation": 12,
+    "Broken Access Control": 11,
+    "Injection": 11,
+    "Broken Authentication": 9,
+    "Vulnerable Components": 9,
+    "XSS": 9,
+    "Miscellaneous": 7,
+    "Cryptographic Issues": 5,
+    "Broken Anti Automation": 4,
+    "Security Misconfiguration": 4,
+    "Observability Failures": 4,
+    "Insecure Deserialization": 3,
+    "Security through Obscurity": 3,
+    "Unvalidated Redirects": 2,
+    "XXE": 2
+  },
+  "difficulty_distribution": {
+    "1_star_trivial": 15,
+    "2_star_easy": 20,
+    "3_star_moderate": 30,
+    "4_star_hard": 33,
+    "5_star_very_hard": 28,
+    "6_star_expert": 16
+  }
+}
