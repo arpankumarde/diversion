@@ -45,6 +45,8 @@ dependencies = [
     # API server
     "fastapi",
     "uvicorn[standard]",
+    # Web research (BrightData)
+    "brightdata-sdk",
 ]
 
 [project.scripts]

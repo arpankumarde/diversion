@@ -54,6 +54,8 @@ class Hypothesis(BaseModel):
     cvss_score: float | None = None
     confirmed: bool = False
     exploitation_attempted: bool = False
+    chain_from: str = ""      # hypothesis_id of confirmed vuln that spawned this
+    iteration: int = 0        # which pipeline iteration generated this (0 = initial)
 
     @field_validator("confidence")
     @classmethod

@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from functools import partial
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -14,6 +15,11 @@ from nazitest.models.graph import Hypothesis
 from nazitest.models.types import HttpMethod, Severity
 from nazitest.reasoning.openrouter import OpenRouterClient
 from nazitest.reasoning.sanitizer import LLMDataSanitizer
+from nazitest.reasoning.web_research import (
+    ALL_TOOLS,
+    WebResearcher,
+    execute_tool_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +33,23 @@ class BaseAgent:
         self,
         client: OpenRouterClient,
         sanitizer: LLMDataSanitizer | None = None,
+        web_researcher: WebResearcher | None = None,
     ) -> None:
         self.client = client
         self.sanitizer = sanitizer or LLMDataSanitizer()
+        self.web_researcher = web_researcher
+
+    @property
+    def _tools(self) -> list[dict[str, Any]] | None:
+        """Return tool schemas if web researcher is available."""
+        return ALL_TOOLS if self.web_researcher else None
+
+    @property
+    def _tool_executor(self) -> Any:
+        """Return a bound tool executor if web researcher is available."""
+        if self.web_researcher:
+            return partial(execute_tool_call, self.web_researcher)
+        return None
 
     async def _ask(
         self,
@@ -45,6 +65,26 @@ class BaseAgent:
         result = await self.client.reason(
             role=self.role,
             messages=messages,
+            structured_output=structured_output,
+        )
+        return result["content"]
+
+    async def _ask_with_tools(
+        self,
+        system_prompt: str,
+        user_message: str,
+        structured_output: dict | None = None,
+    ) -> str:
+        """Send a message with tool-use support (falls back to _ask if no tools)."""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        result = await self.client.reason_with_tools(
+            role=self.role,
+            messages=messages,
+            tools=self._tools,
+            tool_executor=self._tool_executor,
             structured_output=structured_output,
         )
         return result["content"]
@@ -73,7 +113,30 @@ class Strategist(BaseAgent):
         "5) For each parameter, consider: SQLi, XSS, SSRF, "
         "path traversal, command injection, IDOR "
         "6) Don't hold back — false positives are better than "
-        "missing a real vulnerability"
+        "missing a real vulnerability\n\n"
+        "You have access to two tools:\n"
+        "- web_search: Search the web for CVEs, vulnerability databases, "
+        "exploit techniques, and bypass methods\n"
+        "- web_scrape: Read specific pages from PayloadsAllTheThings, "
+        "HackTricks, CVE databases, or other security resources\n\n"
+        "USE THESE TOOLS PROACTIVELY to research CVEs, known vulnerabilities "
+        "for the detected technology stack, bypass techniques, and real-world "
+        "exploit examples. Do not rely solely on your training data."
+    )
+
+    CHAIN_PROMPT = (
+        "You are an expert penetration tester performing vulnerability chaining. "
+        "Given a list of CONFIRMED vulnerabilities, generate follow-up hypotheses "
+        "that chain from them. Think about:\n"
+        "- SQLi confirmed → extract credentials, dump database schema, read files\n"
+        "- XSS confirmed → steal session cookies, phish credentials, CSRF bypass\n"
+        "- IDOR confirmed → privilege escalation, access admin resources\n"
+        "- SSRF confirmed → internal service discovery, cloud metadata access\n"
+        "- Path traversal → read config files, source code, credentials\n"
+        "- Command injection → reverse shell, file read, pivot to internal network\n\n"
+        "Generate NEW hypotheses that leverage the confirmed vulns. "
+        "Each hypothesis should describe a specific chained attack. "
+        "Be creative but realistic."
     )
 
     async def analyze(
@@ -86,7 +149,7 @@ class Strategist(BaseAgent):
         )
         if code_context:
             user_msg += self._format_code_context(code_context)
-        return await self._ask(self.SYSTEM_PROMPT, user_msg)
+        return await self._ask_with_tools(self.SYSTEM_PROMPT, user_msg)
 
     @staticmethod
     def _format_code_context(code_context: dict) -> str:
@@ -241,6 +304,7 @@ class Strategist(BaseAgent):
         analysis: str,
         graph_summary: dict,
         code_context: dict | None = None,
+        exploit_context: dict | None = None,
     ) -> list[Hypothesis]:
         sanitized = self._sanitize(graph_summary)
         user_msg = (
@@ -263,12 +327,102 @@ class Strategist(BaseAgent):
         )
         if code_context:
             user_msg += self._format_code_context(code_context)
+        if exploit_context:
+            user_msg += (
+                "\n\n--- PREVIOUS EXPLOITATION RESULTS ---\n"
+                + json.dumps(exploit_context, indent=2)[:5000]
+            )
+
+        # Two-phase approach: tool-use and structured output can't coexist
+        # Phase 1: Research with tools (if available)
+        research_context = ""
+        if self._tools:
+            research_msg = (
+                f"Research vulnerabilities for the target before generating hypotheses.\n\n"
+                f"Analysis:\n{analysis}\n\n"
+                f"Knowledge graph summary:\n{sanitized}\n\n"
+                "Use web_search to look up CVEs, known vulnerabilities for the detected "
+                "technologies, and common exploit techniques. Use web_scrape to read "
+                "relevant vulnerability databases or payload lists. "
+                "Then summarize your research findings."
+            )
+            if code_context:
+                research_msg += self._format_code_context(code_context)
+            research_context = await self._ask_with_tools(
+                self.SYSTEM_PROMPT, research_msg,
+            )
+            user_msg += (
+                "\n\n--- WEB RESEARCH FINDINGS ---\n"
+                + research_context[:8000]
+            )
+
+        # Phase 2: Structured output (no tools)
         raw = await self._ask(
             self.SYSTEM_PROMPT,
             user_msg,
             structured_output=self.HYPOTHESES_SCHEMA,
         )
         return self._parse_hypotheses(raw)
+
+    async def generate_chain_hypotheses(
+        self,
+        confirmed_vulns: list[dict[str, Any]],
+        graph_summary: dict,
+        exploit_context: dict | None = None,
+        iteration: int = 0,
+    ) -> list[Hypothesis]:
+        """Generate follow-up hypotheses from confirmed vulnerabilities (chaining)."""
+        sanitized = self._sanitize(graph_summary)
+        user_msg = (
+            f"CONFIRMED VULNERABILITIES:\n"
+            f"{json.dumps(confirmed_vulns, indent=2)}\n\n"
+            f"Knowledge graph:\n{sanitized}\n\n"
+        )
+        if exploit_context:
+            user_msg += (
+                "Exploitation context:\n"
+                + json.dumps(exploit_context, indent=2)[:5000]
+                + "\n\n"
+            )
+        user_msg += (
+            "Generate follow-up vulnerability hypotheses that CHAIN from the "
+            "confirmed vulns above. Each hypothesis should leverage a confirmed "
+            "vulnerability to achieve deeper access or greater impact.\n\n"
+            "IMPORTANT field rules:\n"
+            "- target_endpoint: URL PATH ONLY\n"
+            "- http_method: GET or POST\n"
+            "- target_parameter: the parameter name\n"
+            "- vuln_type: sqli, xss, cmdi, idor, ssrf, etc.\n"
+            "- severity: critical/high/medium/low/info\n"
+            "- confidence: 0.0-1.0"
+        )
+
+        # Phase 1: Research with tools if available
+        if self._tools:
+            research_msg = (
+                f"Research chaining techniques for these confirmed vulnerabilities:\n"
+                f"{json.dumps(confirmed_vulns, indent=2)}\n\n"
+                "Search for post-exploitation techniques, privilege escalation methods, "
+                "and vulnerability chaining strategies for these specific vuln types."
+            )
+            research = await self._ask_with_tools(self.CHAIN_PROMPT, research_msg)
+            user_msg += "\n\n--- RESEARCH ---\n" + research[:5000]
+
+        # Phase 2: Structured output
+        raw = await self._ask(
+            self.CHAIN_PROMPT,
+            user_msg,
+            structured_output=self.HYPOTHESES_SCHEMA,
+        )
+        hypotheses = self._parse_hypotheses(raw)
+
+        # Tag chain metadata
+        for h in hypotheses:
+            h.iteration = iteration + 1
+            if confirmed_vulns:
+                h.chain_from = confirmed_vulns[0].get("id", "")
+
+        return hypotheses
 
     @staticmethod
     def _parse_hypotheses(raw: str) -> list[Hypothesis]:
@@ -445,7 +599,7 @@ class Strategist(BaseAgent):
 
 
 class Scout(BaseAgent):
-    """Exploration agent — optional, not used in main pipeline."""
+    """Exploration agent — investigates hypotheses before exploitation."""
 
     role = "scout"
 
@@ -462,14 +616,17 @@ class Scout(BaseAgent):
         "- Similar endpoints have been vulnerable before "
         "- No WAF/security headers "
         "Only rate below 0.5 if there's strong evidence the "
-        "vulnerability does NOT exist."
+        "vulnerability does NOT exist.\n\n"
+        "You have access to web_search and web_scrape tools. "
+        "Use them to research the specific technology, framework version, "
+        "and known vulnerabilities."
     )
 
     async def investigate(
         self, hypothesis: dict, evidence: dict
     ) -> str:
         sanitized_evidence = self._sanitize(evidence)
-        return await self._ask(
+        return await self._ask_with_tools(
             self.SYSTEM_PROMPT,
             f"Investigate this hypothesis:\n{hypothesis}\n\n"
             f"Evidence:\n{sanitized_evidence}\n\n"
@@ -537,7 +694,11 @@ class ExploitPlanner(BaseAgent):
         "- Include at least one data extraction payload "
         "- Vary your approach (error-based, union, blind) "
         "Return ONLY raw payloads, one per line. "
-        "No explanations, no numbering, no markdown."
+        "No explanations, no numbering, no markdown.\n\n"
+        "You have access to web_search and web_scrape tools. "
+        "Search for payloads, bypass techniques, and WAF evasion on "
+        "PayloadsAllTheThings, HackTricks, and other security resources. "
+        "Use these to find effective, real-world payloads."
     )
 
     JUDGE_PROMPT = (
@@ -596,6 +757,7 @@ class ExploitPlanner(BaseAgent):
         self,
         hypothesis: dict,
         baseline_info: str = "",
+        previous_results: str = "",
     ) -> list[str]:
         """Ask LLM to generate targeted payloads."""
         vuln_type = hypothesis.get("vuln_type", "")
@@ -611,13 +773,15 @@ class ExploitPlanner(BaseAgent):
         )
         if baseline_info:
             context += f"\nBaseline response: {baseline_info}\n"
+        if previous_results:
+            context += f"\nPrevious attempt results:\n{previous_results}\n"
 
         context += (
             "\nGenerate 3-5 payloads to test this. "
             "One per line, raw payloads only."
         )
 
-        raw = await self._ask(self.GENERATE_PROMPT, context)
+        raw = await self._ask_with_tools(self.GENERATE_PROMPT, context)
 
         payloads = []
         for line in raw.strip().split("\n"):

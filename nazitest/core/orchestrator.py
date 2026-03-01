@@ -21,6 +21,7 @@ from nazitest.exploitation.curl_exploit import CurlExploiter
 from nazitest.exploitation.engine import ExploitationEngine
 from nazitest.models.config import RunConfig
 from nazitest.models.exploit import ExploitResult
+from nazitest.models.graph import Hypothesis
 from nazitest.models.types import ArtifactType, EdgeType, HttpMethod, NodeType, OrchestratorPhase
 from nazitest.proxy.manager import ProxyManager
 from nazitest.recon.browser import BrowserController
@@ -36,9 +37,9 @@ console = Console()
 
 
 class Orchestrator:
-    """Main state machine: INIT -> AUTHORIZE -> CRAWL -> MODEL -> REASON -> EXPLOIT -> REPORT.
+    """Main state machine: INIT -> CRAWL -> MODEL -> CODEBASE -> iterative REASON/SCOUT/EXPLOIT -> REPORT.
 
-    Manages phase transitions, human-in-loop gates, error recovery, run persistence.
+    Supports iterative pipeline with vulnerability chaining and web research.
     """
 
     def __init__(
@@ -69,14 +70,22 @@ class Orchestrator:
         self._stage_timings: dict[str, dict[str, Any]] = {}
         self._xref_result: XRefResult | None = None
 
+        # Iterative pipeline state
+        self._tested_hypothesis_ids: set[str] = set()
+        self._web_researcher: Any = None  # WebResearcher
+        self._exploit_context: dict[str, Any] = {"confirmed_vulns": []}
+        self._iterations_completed: int = 0
+        self._chain_hypotheses_generated: int = 0
+
     async def run(self) -> str:
-        """Execute the full scan pipeline. Returns the run ID."""
+        """Execute the full scan pipeline with iterative REASON→EXPLOIT loop."""
         try:
             # INIT phase
             self._set_phase(OrchestratorPhase.INIT)
             self.run_id, self.run_path = self.run_manager.create_run(self.config)
             self.store = ArtifactStore(self.run_path)
             self.start_time = time.time()
+            self._init_web_researcher()
             console.print(f"[green]Run created:[/green] {self.run_id}")
 
             # CRAWL + RECORD phase
@@ -104,20 +113,69 @@ class Orchestrator:
                     "elapsed_seconds": round(time.time() - t0, 1),
                 }
 
-            # REASON phase — LLM hypothesis generation
-            self._set_phase(OrchestratorPhase.REASON)
-            t0 = time.time()
-            await self._reason()
-            self._stage_timings["reason"] = {
-                "elapsed_seconds": round(time.time() - t0, 1),
-            }
+            # ITERATIVE REASON → SCOUT → EXPLOIT → CHAIN loop
+            t0_loop = time.time()
+            max_iterations = self.config.max_iterations
 
-            # EXPLOIT phase
-            self._set_phase(OrchestratorPhase.EXPLOIT)
-            t0 = time.time()
-            await self._exploit()
-            self._stage_timings["exploit"] = {
-                "elapsed_seconds": round(time.time() - t0, 1),
+            for iteration in range(max_iterations):
+                if not self._check_time_limit():
+                    console.print("[yellow]Time limit reached — stopping iterations.[/yellow]")
+                    break
+
+                console.print(
+                    f"\n[bold cyan]═══ Iteration {iteration + 1}/{max_iterations} ═══[/bold cyan]"
+                )
+
+                # REASON
+                self._set_phase(OrchestratorPhase.REASON)
+                t0 = time.time()
+                new_hypotheses = await self._reason_iteration(iteration)
+                self._stage_timings.setdefault(f"reason_iter{iteration}", {})[
+                    "elapsed_seconds"
+                ] = round(time.time() - t0, 1)
+
+                if not new_hypotheses:
+                    console.print("[yellow]No new hypotheses — stopping iterations.[/yellow]")
+                    break
+
+                # SCOUT (optional)
+                if self.config.enable_scout:
+                    t0 = time.time()
+                    await self._scout_phase(new_hypotheses, iteration)
+                    self._stage_timings.setdefault(f"scout_iter{iteration}", {})[
+                        "elapsed_seconds"
+                    ] = round(time.time() - t0, 1)
+
+                # EXPLOIT
+                self._set_phase(OrchestratorPhase.EXPLOIT)
+                t0 = time.time()
+                await self._exploit_iteration(new_hypotheses, iteration)
+                self._stage_timings.setdefault(f"exploit_iter{iteration}", {})[
+                    "elapsed_seconds"
+                ] = round(time.time() - t0, 1)
+
+                self._iterations_completed = iteration + 1
+
+                # CHAIN ANALYSIS (skip on last iteration)
+                if iteration < max_iterations - 1:
+                    confirmed = [
+                        h for h in self.knowledge_graph.get_confirmed_hypotheses()
+                        if h.iteration == iteration
+                    ]
+                    if not confirmed:
+                        console.print(
+                            "[yellow]No confirmed vulns in this iteration "
+                            "— stopping.[/yellow]"
+                        )
+                        break
+                    chains = await self._chain_analysis(confirmed, iteration)
+                    if not chains:
+                        console.print("[yellow]No chain hypotheses — stopping.[/yellow]")
+                        break
+
+            self._stage_timings["iterative_loop"] = {
+                "elapsed_seconds": round(time.time() - t0_loop, 1),
+                "iterations_completed": self._iterations_completed,
             }
 
             # REPORT phase
@@ -142,8 +200,41 @@ class Orchestrator:
             logger.exception("Scan failed: %s", e)
             console.print(f"[red]Scan failed: {e}[/red]")
             self._save_state()
+        finally:
+            if self._web_researcher:
+                try:
+                    await self._web_researcher.close()
+                except Exception:
+                    pass
 
         return self.run_id
+
+    def _init_web_researcher(self) -> None:
+        """Initialize web researcher if BrightData API key is available."""
+        if self.settings.brightdata_api_key and self.config.enable_web_research:
+            from nazitest.reasoning.web_research import WebResearcher
+            self._web_researcher = WebResearcher(api_key=self.settings.brightdata_api_key)
+            console.print("[green]Web research enabled[/green] (BrightData)")
+        else:
+            console.print("[yellow]Web research disabled[/yellow] (no BRIGHTDATA_API_KEY)")
+
+    def _create_openrouter_client(self) -> Any:
+        """Create a fresh OpenRouterClient."""
+        from nazitest.reasoning.openrouter import OpenRouterClient
+        return OpenRouterClient(
+            api_key=self.settings.openrouter_api_key,
+            models=self.settings.models.models,
+            base_url=self.settings.openrouter_base_url,
+            budget_limit=self.settings.models.budget.max_cost_per_run_usd,
+            warn_at=self.settings.models.budget.warn_at_usd,
+        )
+
+    def _merge_usage(self, client: Any) -> None:
+        """Merge client usage into the global tracker."""
+        from nazitest.reasoning.openrouter import UsageTracker
+        if self._usage_tracker is None:
+            self._usage_tracker = UsageTracker()
+        self._usage_tracker.merge(client.usage)
 
     async def _crawl(self) -> None:
         """Open a visible browser for the user to manually browse the target.
@@ -315,65 +406,90 @@ class Orchestrator:
             f"{self.knowledge_graph.edge_count} edges"
         )
 
-    async def _reason(self) -> None:
-        """Run LLM reasoning to generate vulnerability hypotheses."""
+    async def _reason_iteration(self, iteration: int) -> list[Hypothesis]:
+        """Run LLM reasoning for a single iteration. Returns new hypotheses."""
         if not self.settings.openrouter_api_key:
             console.print(
                 "[yellow]No OpenRouter API key configured. "
                 "Skipping reasoning phase.[/yellow]"
             )
-            return
+            return []
 
         if self.knowledge_graph.node_count == 0:
             console.print("[yellow]Empty knowledge graph. Skipping reasoning.[/yellow]")
-            return
+            return []
 
         from nazitest.reasoning.agents import Strategist
-        from nazitest.reasoning.openrouter import OpenRouterClient
 
-        client = OpenRouterClient(
-            api_key=self.settings.openrouter_api_key,
-            models=self.settings.models.models,
-            base_url=self.settings.openrouter_base_url,
-            budget_limit=self.settings.models.budget.max_cost_per_run_usd,
-            warn_at=self.settings.models.budget.warn_at_usd,
-        )
+        client = self._create_openrouter_client()
 
         try:
-            strategist = Strategist(client)
+            strategist = Strategist(
+                client, web_researcher=self._web_researcher,
+            )
             graph_summary = self.knowledge_graph.to_snapshot().model_dump(mode="json")
-
-            # Build code context from codebase analysis
             code_context = self._build_code_context()
 
-            console.print("[blue]Strategist analyzing attack surface...[/blue]")
-            analysis = await strategist.analyze(graph_summary, code_context=code_context)
-            console.print("[green]Analysis complete.[/green]")
-
-            # Try structured output first, fall back to text parsing
-            console.print("[blue]Generating vulnerability hypotheses...[/blue]")
-            hypotheses: list = []
-            hypotheses_text = ""
-            try:
-                hypotheses = await strategist.hypothesize_structured(
-                    analysis, graph_summary, code_context=code_context,
+            if iteration == 0:
+                # First iteration: full analysis + hypothesis generation
+                console.print("[blue]Strategist analyzing attack surface...[/blue]")
+                analysis = await strategist.analyze(
+                    graph_summary, code_context=code_context,
                 )
+                console.print("[green]Analysis complete.[/green]")
+
+                console.print("[blue]Generating vulnerability hypotheses...[/blue]")
+                hypotheses: list[Hypothesis] = []
+                hypotheses_text = ""
+                try:
+                    hypotheses = await strategist.hypothesize_structured(
+                        analysis, graph_summary,
+                        code_context=code_context,
+                        exploit_context=self._exploit_context if self._exploit_context.get(
+                            "confirmed_vulns"
+                        ) else None,
+                    )
+                    console.print(
+                        f"[green]Structured hypotheses:[/green] "
+                        f"{len(hypotheses)} generated"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Structured output failed, falling back to text: %s", e,
+                    )
+                    hypotheses_text = await strategist.hypothesize(
+                        analysis, graph_summary,
+                    )
+                    hypotheses = Strategist._parse_hypotheses(hypotheses_text)
+                    console.print(
+                        f"[green]Parsed hypotheses from text:[/green] "
+                        f"{len(hypotheses)} found"
+                    )
+            else:
+                # Iteration 1+: chain hypotheses were already added to graph
+                # by _chain_analysis() in previous iteration — retrieve them
+                hypotheses = [
+                    h for h in self.knowledge_graph.get_all_hypotheses()
+                    if h.iteration == iteration
+                    and h.id not in self._tested_hypothesis_ids
+                ]
                 console.print(
-                    f"[green]Structured hypotheses:[/green] {len(hypotheses)} generated"
-                )
-            except Exception as e:
-                logger.warning("Structured output failed, falling back to text: %s", e)
-                hypotheses_text = await strategist.hypothesize(analysis, graph_summary)
-                hypotheses = Strategist._parse_hypotheses(hypotheses_text)
-                console.print(
-                    f"[green]Parsed hypotheses from text:[/green] {len(hypotheses)} found"
+                    f"[blue]Iteration {iteration + 1}:[/blue] "
+                    f"{len(hypotheses)} chain hypotheses to test"
                 )
 
-            # Add hypotheses to knowledge graph
-            for h in hypotheses:
-                self.knowledge_graph.add_hypothesis(h)
+            # Filter out already-tested hypotheses
+            new_hypotheses = [
+                h for h in hypotheses
+                if h.id not in self._tested_hypothesis_ids
+            ]
 
-            # Save updated knowledge graph with hypotheses
+            # Add hypotheses to knowledge graph (iteration 0 only — chains already added)
+            if iteration == 0:
+                for h in new_hypotheses:
+                    self.knowledge_graph.add_hypothesis(h)
+
+            # Save updated knowledge graph
             assert self.store is not None
             self.store.save(
                 ArtifactType.KNOWLEDGE_GRAPH,
@@ -384,305 +500,287 @@ class Orchestrator:
             self.store.save(
                 ArtifactType.LLM_SESSION,
                 {
-                    "analysis": analysis,
-                    "hypotheses": [h.model_dump(mode="json") for h in hypotheses],
-                    "hypotheses_text": hypotheses_text,
+                    "iteration": iteration,
+                    "hypotheses": [
+                        h.model_dump(mode="json") for h in new_hypotheses
+                    ],
                     "usage": client.usage.summary(),
                 },
-                name="strategist",
+                name=f"strategist_iter{iteration}",
             )
 
-            # Accumulate usage for meta.json
-            from nazitest.reasoning.openrouter import UsageTracker
+            self._merge_usage(client)
 
-            if self._usage_tracker is None:
-                self._usage_tracker = UsageTracker()
-            self._usage_tracker.merge(client.usage)
-
-            # Save per-stage cost
-            self._stage_timings.setdefault("reason", {})[
+            stage_key = f"reason_iter{iteration}"
+            self._stage_timings.setdefault(stage_key, {})[
                 "llm_cost_usd"
             ] = round(client.usage.total_cost_usd, 6)
-            self._stage_timings.setdefault("reason", {})[
+            self._stage_timings.setdefault(stage_key, {})[
                 "llm_calls"
             ] = len(client.usage.calls)
 
             console.print(
                 f"[green]Reasoning complete.[/green] "
-                f"{len(hypotheses)} hypotheses added to graph."
+                f"{len(new_hypotheses)} new hypotheses."
             )
+            return new_hypotheses
+
         except Exception as e:
             logger.warning("Reasoning phase failed: %s", e)
-            console.print(
-                f"[yellow]Reasoning phase error: {e}[/yellow]"
-            )
+            console.print(f"[yellow]Reasoning phase error: {e}[/yellow]")
+            return []
         finally:
             await client.close()
 
-    async def _exploit(self) -> None:
-        """Agentic exploitation — LLM-driven feedback loop.
+    async def _scout_phase(
+        self, hypotheses: list[Hypothesis], iteration: int,
+    ) -> None:
+        """Scout investigates hypotheses concurrently, optionally cross-validates."""
+        if not self.settings.openrouter_api_key:
+            return
+
+        from nazitest.reasoning.agents import CrossValidator, Scout
+        from nazitest.reasoning.belief import BeliefRefinementLoop
+
+        client = self._create_openrouter_client()
+        belief_loop = BeliefRefinementLoop()
+        concurrency = min(self.config.max_concurrent_connections, 5)
+
+        try:
+            scout = Scout(client, web_researcher=self._web_researcher)
+            cross_validator = (
+                CrossValidator(client) if self.config.enable_cross_validator else None
+            )
+
+            graph_summary = self.knowledge_graph.to_snapshot().model_dump(mode="json")
+
+            async def _investigate_one(h: Hypothesis) -> None:
+                if client.usage.budget_exceeded or not self._check_time_limit():
+                    return
+                h_dict = h.model_dump(mode="json")
+                try:
+                    scout_response = await scout.investigate(
+                        h_dict, {"graph_summary": graph_summary},
+                    )
+                    scout_confidence = BeliefRefinementLoop.parse_confidence_from_llm(
+                        scout_response,
+                    )
+                    if scout_confidence is not None:
+                        old_conf = h.confidence
+                        belief_loop.update_belief(h, scout_confidence)
+                        console.print(
+                            f"  [blue]Scout:[/blue] {h.title[:50]} "
+                            f"→ {scout_confidence:.2f} ({old_conf:.2f} → {h.confidence:.2f})"
+                        )
+                    else:
+                        console.print(
+                            f"  [blue]Scout:[/blue] {h.title[:50]} → no confidence parsed"
+                        )
+
+                    if cross_validator and belief_loop.is_ready_for_cross_validation(h):
+                        cv_response = await cross_validator.challenge(h_dict, {
+                            "scout_response": scout_response,
+                            "graph_summary": graph_summary,
+                        })
+                        cv_confidence = BeliefRefinementLoop.parse_confidence_from_llm(
+                            cv_response,
+                        )
+                        if cv_confidence is not None:
+                            old_conf = h.confidence
+                            belief_loop.reconcile(h, cv_confidence)
+                            console.print(
+                                f"    CrossValidator: {cv_confidence:.2f} "
+                                f"(adjusted → {h.confidence:.2f})"
+                            )
+
+                    self.knowledge_graph.add_hypothesis(h)
+                except Exception as e:
+                    logger.warning("Scout failed for %s: %s", h.id, e)
+
+            # Process in concurrent batches
+            console.print(
+                f"  [blue]Scout investigating {len(hypotheses)} hypotheses "
+                f"({concurrency} concurrent)...[/blue]"
+            )
+            sem = asyncio.Semaphore(concurrency)
+
+            async def _limited(h: Hypothesis) -> None:
+                async with sem:
+                    await _investigate_one(h)
+
+            await asyncio.gather(*[_limited(h) for h in hypotheses])
+
+            self._merge_usage(client)
+
+            stage_key = f"scout_iter{iteration}"
+            self._stage_timings.setdefault(stage_key, {})[
+                "llm_cost_usd"
+            ] = round(client.usage.total_cost_usd, 6)
+            self._stage_timings.setdefault(stage_key, {})[
+                "llm_calls"
+            ] = len(client.usage.calls)
+
+        except Exception as e:
+            logger.warning("Scout phase failed: %s", e)
+            console.print(f"[yellow]Scout error: {e}[/yellow]")
+        finally:
+            await client.close()
+
+    async def _exploit_iteration(
+        self, hypotheses: list[Hypothesis], iteration: int,
+    ) -> None:
+        """Agentic exploitation for a specific set of hypotheses.
 
         For each hypothesis:
         1. Get baseline response (benign value)
-        2. LLM generates 3-5 targeted payloads
+        2. LLM generates 3-5 targeted payloads (with web research)
         3. Send payloads, collect response behavior
         4. Pattern-match for obvious signals (fast-path)
         5. Show results to LLM → verdict: confirmed/not/retry
         6. If retry: LLM adapts, generates new payloads
         7. Max 3 rounds per hypothesis
-
-        No hardcoded payloads. No confidence scores.
-        Binary outcome: confirmed=True or confirmed=False.
         """
         assert self.store is not None
         max_rounds = 3
 
         if not self.settings.openrouter_api_key:
-            console.print(
-                "[yellow]No API key. Skipping exploit.[/yellow]"
-            )
+            console.print("[yellow]No API key. Skipping exploit.[/yellow]")
             return
 
-        hypotheses = self.knowledge_graph.get_all_hypotheses()
         if not hypotheses:
-            console.print(
-                "[yellow]No hypotheses to exploit.[/yellow]"
-            )
+            console.print("[yellow]No hypotheses to exploit.[/yellow]")
             return
 
         # Load cookies from manual browse
         cookies: dict[str, str] = {}
         try:
-            cookie_files = self.store.list_artifacts(
-                ArtifactType.COOKIE_JAR
-            )
-            logger.info(
-                "Cookie files found: %s", cookie_files
-            )
+            cookie_files = self.store.list_artifacts(ArtifactType.COOKIE_JAR)
             if cookie_files:
-                cdata = self.store.load(
-                    ArtifactType.COOKIE_JAR, cookie_files[-1]
-                )
+                cdata = self.store.load(ArtifactType.COOKIE_JAR, cookie_files[-1])
                 for c in cdata.get("cookies", []):
-                    if (
-                        isinstance(c, dict)
-                        and "name" in c
-                        and "value" in c
-                    ):
+                    if isinstance(c, dict) and "name" in c and "value" in c:
                         cookies[c["name"]] = c["value"]
-                logger.info(
-                    "Loaded %d cookies: %s",
-                    len(cookies),
-                    list(cookies.keys()),
-                )
+                if iteration == 0:
+                    console.print(
+                        f"  [green]Loaded {len(cookies)} cookies: "
+                        f"{', '.join(cookies.keys())}[/green]"
+                    )
+            elif iteration == 0:
                 console.print(
-                    f"  [green]Loaded {len(cookies)} cookies: "
-                    f"{', '.join(cookies.keys())}[/green]"
-                )
-            else:
-                logger.warning("No cookie files found")
-                console.print(
-                    "  [yellow]No cookies found — "
-                    "exploits may fail on auth-required "
-                    "targets[/yellow]"
+                    "  [yellow]No cookies found — exploits may fail "
+                    "on auth-required targets[/yellow]"
                 )
         except Exception as e:
             logger.warning("Could not load cookies: %s", e)
-            console.print(
-                f"  [yellow]Cookie load error: {e}[/yellow]"
-            )
 
         from nazitest.reasoning.agents import ExploitPlanner
-        from nazitest.reasoning.openrouter import (
-            OpenRouterClient,
-        )
 
-        client = OpenRouterClient(
-            api_key=self.settings.openrouter_api_key,
-            models=self.settings.models.models,
-            base_url=self.settings.openrouter_base_url,
-            budget_limit=(
-                self.settings.models.budget
-                .max_cost_per_run_usd
-            ),
-            warn_at=self.settings.models.budget.warn_at_usd,
-        )
-
+        client = self._create_openrouter_client()
         proxy_url = self.proxy_manager.get_proxy_url("exploit")
         curl_exploiter = CurlExploiter(proxy_url=proxy_url)
-        engine = ExploitationEngine(
-            curl_exploiter=curl_exploiter,
-            max_attempts=3,
-        )
+        engine = ExploitationEngine(curl_exploiter=curl_exploiter, max_attempts=3)
 
-        planner = ExploitPlanner(client)
+        planner = ExploitPlanner(client, web_researcher=self._web_researcher)
         target_url = self.config.scope.target_url
 
-        sorted_hyps = sorted(
-            hypotheses,
-            key=lambda h: h.confidence,
-            reverse=True,
-        )
+        sorted_hyps = sorted(hypotheses, key=lambda h: h.confidence, reverse=True)
         total = len(sorted_hyps)
 
         try:
             for idx, h in enumerate(sorted_hyps, 1):
                 if not self._check_time_limit():
-                    console.print(
-                        "[yellow]Time limit reached.[/yellow]"
-                    )
+                    console.print("[yellow]Time limit reached.[/yellow]")
+                    break
+                if client.usage.budget_exceeded:
+                    console.print("[yellow]Budget exceeded.[/yellow]")
                     break
 
                 console.print(
-                    f"\n[bold][{idx}/{total}] "
-                    f"{h.title}[/bold] "
-                    f"({h.vuln_type})"
+                    f"\n[bold][{idx}/{total}] {h.title}[/bold] ({h.vuln_type})"
                 )
                 h_dict = h.model_dump(mode="json")
 
                 try:
-                    # Determine HTTP method(s) from hypothesis
-                    h_method_str = h_dict.get(
-                        "http_method", ""
-                    ).upper()
+                    # Determine HTTP method(s)
+                    h_method_str = h_dict.get("http_method", "").upper()
                     if h_method_str == "POST":
                         exploit_methods = (HttpMethod.POST,)
                     elif h_method_str == "GET":
                         exploit_methods = (HttpMethod.GET,)
                     else:
-                        # Unknown — try both
-                        exploit_methods = (
-                            HttpMethod.GET,
-                            HttpMethod.POST,
-                        )
+                        exploit_methods = (HttpMethod.GET, HttpMethod.POST)
 
-                    # ── Baseline ──
+                    # Baseline
                     template = ExploitPlanner.build_strategy(
-                        h_dict, "1", target_url,
-                        exploit_methods[0],
+                        h_dict, "1", target_url, exploit_methods[0],
                     )
-                    baseline = await engine.get_baseline(
-                        template, cookies or None,
-                    )
-                    baseline_info = (
-                        ExploitPlanner.format_baseline_info(
-                            baseline
-                        )
-                    )
-                    console.print(
-                        f"  Baseline: {baseline_info}"
-                    )
+                    baseline = await engine.get_baseline(template, cookies or None)
+                    baseline_info = ExploitPlanner.format_baseline_info(baseline)
+                    console.print(f"  Baseline: {baseline_info}")
 
                     confirmed = False
                     evidence = ""
-                    # (payload, method_str, ExploitResult)
-                    all_attempts: list[
-                        tuple[str, str, ExploitResult]
-                    ] = []
-
+                    all_attempts: list[tuple[str, str, ExploitResult]] = []
                     payloads: list[str] = []
 
                     for round_num in range(max_rounds):
-                        if confirmed:
-                            break
-                        if not self._check_time_limit():
+                        if confirmed or not self._check_time_limit():
                             break
 
-                        # ── Generate payloads ──
+                        # Generate payloads
                         if round_num == 0:
-                            payloads = (
-                                await planner
-                                .generate_payloads(
-                                    h_dict, baseline_info,
-                                )
+                            payloads = await planner.generate_payloads(
+                                h_dict, baseline_info,
                             )
-                            console.print(
-                                f"  Round 1: "
-                                f"{len(payloads)} payloads"
-                            )
+                            console.print(f"  Round 1: {len(payloads)} payloads")
                             for p in payloads:
-                                console.print(
-                                    f"    → {p[:70]}"
-                                )
+                                console.print(f"    → {p[:70]}")
 
                         if not payloads:
-                            console.print(
-                                "  No payloads generated"
-                            )
+                            console.print("  No payloads generated")
                             break
 
-                        # ── Send payloads ──
+                        # Send payloads
                         for payload in payloads:
                             if confirmed:
                                 break
                             for method in exploit_methods:
                                 if confirmed:
                                     break
-                                s = (
-                                    ExploitPlanner
-                                    .build_strategy(
-                                        h_dict,
-                                        payload,
-                                        target_url,
-                                        method,
-                                    )
+                                s = ExploitPlanner.build_strategy(
+                                    h_dict, payload, target_url, method,
                                 )
-                                r = (
-                                    await engine.single_shot(
-                                        s,
-                                        cookies or None,
-                                        vuln_type=(
-                                            h.vuln_type
-                                        ),
-                                        baseline=baseline,
-                                    )
+                                r = await engine.single_shot(
+                                    s, cookies or None,
+                                    vuln_type=h.vuln_type, baseline=baseline,
                                 )
-                                all_attempts.append((
-                                    payload,
-                                    method.value,
-                                    r,
-                                ))
+                                all_attempts.append((payload, method.value, r))
                                 self.exploit_results.append(r)
 
-                                # Fast-path: pattern match
                                 if r.confirmed:
                                     confirmed = True
-                                    evidence = (
-                                        r.evidence_summary
-                                    )
-                                    self._log_confirmed(
-                                        h, s, r,
-                                    )
+                                    evidence = r.evidence_summary
+                                    self._log_confirmed(h, s, r)
 
                         if confirmed:
                             break
 
-                        # ── LLM judges results ──
-                        results_summary = (
-                            ExploitPlanner
-                            .format_results_summary(
-                                all_attempts, baseline,
-                            )
+                        # LLM judges results
+                        results_summary = ExploitPlanner.format_results_summary(
+                            all_attempts, baseline,
                         )
-                        judgment = (
-                            await planner.judge_results(
-                                h_dict,
-                                results_summary,
-                                baseline_info,
-                            )
+                        judgment = await planner.judge_results(
+                            h_dict, results_summary, baseline_info,
                         )
 
                         verdict = judgment["verdict"]
-                        console.print(
-                            f"  LLM verdict: {verdict}"
-                        )
+                        console.print(f"  LLM verdict: {verdict}")
 
                         if verdict == "confirmed":
                             confirmed = True
                             evidence = judgment["evidence"]
                             console.print(
-                                f"  [bold green]LLM "
-                                f"CONFIRMED[/bold green]: "
+                                f"  [bold green]LLM CONFIRMED[/bold green]: "
                                 f"{evidence[:200]}"
                             )
                         elif verdict == "not_vulnerable":
@@ -692,34 +790,37 @@ class Orchestrator:
                             )
                             break
                         else:
-                            # "continue" — new payloads
-                            payloads = judgment.get(
-                                "next_payloads", []
-                            )
+                            payloads = judgment.get("next_payloads", [])
                             if not payloads:
                                 break
                             console.print(
                                 f"  Round {round_num + 2}: "
-                                f"{len(payloads)} new "
-                                f"payloads"
+                                f"{len(payloads)} new payloads"
                             )
                             for p in payloads:
-                                console.print(
-                                    f"    → {p[:70]}"
-                                )
+                                console.print(f"    → {p[:70]}")
 
-                    # ── Update hypothesis ──
+                    # Update hypothesis
                     h.confirmed = confirmed
                     h.exploitation_attempted = True
+                    self._tested_hypothesis_ids.add(h.id)
+
                     if confirmed:
                         h.confidence = 1.0
+                        # Track in exploit context for chain analysis
+                        self._exploit_context["confirmed_vulns"].append({
+                            "id": h.id,
+                            "title": h.title,
+                            "vuln_type": h.vuln_type,
+                            "target_endpoint": h.target_endpoint,
+                            "target_parameter": h.target_parameter,
+                            "evidence": evidence[:500],
+                            "iteration": iteration,
+                        })
+
                         poc = next(
-                            (
-                                r
-                                for r in self.exploit_results
-                                if r.hypothesis_id == h.id
-                                and r.confirmed
-                            ),
+                            (r for r in self.exploit_results
+                             if r.hypothesis_id == h.id and r.confirmed),
                             None,
                         )
                         if poc:
@@ -728,19 +829,12 @@ class Orchestrator:
                                 {
                                     "hypothesis_id": h.id,
                                     "title": h.title,
-                                    "poc_script": (
-                                        poc.poc_script
-                                    ),
-                                    "evidence": (
-                                        poc.evidence_summary
-                                        or evidence
-                                    ),
+                                    "poc_script": poc.poc_script,
+                                    "evidence": poc.evidence_summary or evidence,
                                 },
                                 name=h.id,
                             )
-                        # Also mark confirmed for LLM-only
-                        # confirmations (no pattern match)
-                        if not poc and evidence:
+                        elif evidence:
                             self.store.save(
                                 ArtifactType.POC,
                                 {
@@ -752,16 +846,11 @@ class Orchestrator:
                                 name=h.id,
                             )
                     else:
-                        console.print(
-                            "  [yellow]Not confirmed"
-                            "[/yellow]"
-                        )
+                        console.print("  [yellow]Not confirmed[/yellow]")
 
                     # Save exploit artifacts
                     h_results = [
-                        r
-                        for r in self.exploit_results
-                        if r.hypothesis_id == h.id
+                        r for r in self.exploit_results if r.hypothesis_id == h.id
                     ]
                     for i, er in enumerate(h_results):
                         self.store.save(
@@ -773,13 +862,9 @@ class Orchestrator:
                     self.knowledge_graph.add_hypothesis(h)
 
                 except Exception as e:
-                    logger.warning(
-                        "Hypothesis %s failed: %s",
-                        h.id, e,
-                    )
-                    console.print(
-                        f"  [red]Error: {e}[/red]"
-                    )
+                    logger.warning("Hypothesis %s failed: %s", h.id, e)
+                    console.print(f"  [red]Error: {e}[/red]")
+                    self._tested_hypothesis_ids.add(h.id)
                     continue
 
             # Save final graph
@@ -788,38 +873,23 @@ class Orchestrator:
                 self.knowledge_graph.to_snapshot(),
             )
 
-            # Accumulate usage
-            from nazitest.reasoning.openrouter import (
-                UsageTracker,
-            )
-            if self._usage_tracker is None:
-                self._usage_tracker = UsageTracker()
-            self._usage_tracker.merge(client.usage)
+            self._merge_usage(client)
 
-            self._stage_timings.setdefault("exploit", {})[
+            stage_key = f"exploit_iter{iteration}"
+            self._stage_timings.setdefault(stage_key, {})[
                 "llm_cost_usd"
             ] = round(client.usage.total_cost_usd, 6)
-            self._stage_timings.setdefault("exploit", {})[
+            self._stage_timings.setdefault(stage_key, {})[
                 "llm_calls"
             ] = len(client.usage.calls)
 
-            # Network stats
-            total_attempts = sum(
-                len(r.attempts)
-                for r in self.exploit_results
-            )
+            # Update network stats
+            total_attempts = sum(len(r.attempts) for r in self.exploit_results)
             blocked_attempts = sum(
-                sum(1 for a in r.attempts if a.blocked)
-                for r in self.exploit_results
+                sum(1 for a in r.attempts if a.blocked) for r in self.exploit_results
             )
-            confirmed_count = sum(
-                1 for r in self.exploit_results
-                if r.confirmed
-            )
-            tested_hyps = len(set(
-                r.hypothesis_id
-                for r in self.exploit_results
-            ))
+            confirmed_count = sum(1 for r in self.exploit_results if r.confirmed)
+            tested_hyps = len(self._tested_hypothesis_ids)
             self._network_stats = {
                 "exploit_requests_sent": total_attempts,
                 "exploit_requests_blocked": blocked_attempts,
@@ -828,16 +898,77 @@ class Orchestrator:
             }
 
             console.print(
-                f"\n[green]Exploitation complete.[/green] "
-                f"{tested_hyps} tested, "
-                f"{total_attempts} requests, "
-                f"{confirmed_count} confirmed."
+                f"\n[green]Exploitation iteration {iteration + 1} complete.[/green] "
+                f"{len(sorted_hyps)} tested, {confirmed_count} total confirmed."
             )
         except Exception as e:
             logger.warning("Exploit phase failed: %s", e)
+            console.print(f"[yellow]Exploit error: {e}[/yellow]")
+        finally:
+            await client.close()
+
+    async def _chain_analysis(
+        self, confirmed_hyps: list[Hypothesis], iteration: int,
+    ) -> list[Hypothesis]:
+        """Generate chain hypotheses from confirmed vulns."""
+        if not self.settings.openrouter_api_key:
+            return []
+
+        from nazitest.reasoning.agents import Strategist
+
+        client = self._create_openrouter_client()
+
+        try:
+            strategist = Strategist(client, web_researcher=self._web_researcher)
+            graph_summary = self.knowledge_graph.to_snapshot().model_dump(mode="json")
+
+            confirmed_dicts = [h.model_dump(mode="json") for h in confirmed_hyps]
+
             console.print(
-                f"[yellow]Exploit error: {e}[/yellow]"
+                f"[blue]Chain analysis:[/blue] {len(confirmed_hyps)} confirmed vulns "
+                f"→ generating follow-up hypotheses..."
             )
+
+            chain_hypotheses = await strategist.generate_chain_hypotheses(
+                confirmed_vulns=confirmed_dicts,
+                graph_summary=graph_summary,
+                exploit_context=self._exploit_context,
+                iteration=iteration,
+            )
+
+            # Add to knowledge graph
+            for h in chain_hypotheses:
+                self.knowledge_graph.add_hypothesis(h)
+
+            self._chain_hypotheses_generated += len(chain_hypotheses)
+            self._merge_usage(client)
+
+            console.print(
+                f"[green]Chain analysis:[/green] {len(chain_hypotheses)} "
+                f"follow-up hypotheses generated"
+            )
+
+            # Save chain artifacts
+            assert self.store is not None
+            self.store.save(
+                ArtifactType.LLM_SESSION,
+                {
+                    "chain_from": [h.id for h in confirmed_hyps],
+                    "iteration": iteration,
+                    "chain_hypotheses": [
+                        h.model_dump(mode="json") for h in chain_hypotheses
+                    ],
+                    "usage": client.usage.summary(),
+                },
+                name=f"chain_iter{iteration}",
+            )
+
+            return chain_hypotheses
+
+        except Exception as e:
+            logger.warning("Chain analysis failed: %s", e)
+            console.print(f"[yellow]Chain analysis error: {e}[/yellow]")
+            return []
         finally:
             await client.close()
 
@@ -950,6 +1081,14 @@ class Orchestrator:
                     self.knowledge_graph
                     .get_exploitable_hypotheses()
                 ),
+            },
+            "iterative_pipeline": {
+                "iterations_completed": self._iterations_completed,
+                "chain_hypotheses_generated": self._chain_hypotheses_generated,
+                "total_hypotheses_tested": len(self._tested_hypothesis_ids),
+                "web_research_enabled": self._web_researcher is not None,
+                "scout_enabled": self.config.enable_scout,
+                "cross_validator_enabled": self.config.enable_cross_validator,
             },
         }
         gen.save_meta(meta)

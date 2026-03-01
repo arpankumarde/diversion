@@ -20,6 +20,7 @@ class Settings(BaseModel):
 
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    brightdata_api_key: str = ""
     chrome_path: str = ""
     proxy_url: str = ""
     proxy_list_path: str = ""
@@ -34,6 +35,7 @@ class Settings(BaseModel):
 
         settings = cls(
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+            brightdata_api_key=os.environ.get("BRIGHTDATA_API_KEY", ""),
             chrome_path=os.environ.get("CHROME_PATH", ""),
             proxy_url=os.environ.get("NAZITEST_PROXY", ""),
             proxy_list_path=os.environ.get("NAZITEST_PROXY_LIST", ""),

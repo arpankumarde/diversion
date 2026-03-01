@@ -90,3 +90,7 @@ class RunConfig(BaseModel):
     )
     max_requests_per_second: int = 10
     max_concurrent_connections: int = 5
+    enable_web_research: bool = True       # auto-enabled if BRIGHTDATA_API_KEY set
+    max_iterations: int = 3                # max REASON→EXPLOIT loops
+    enable_scout: bool = True              # Scout between REASON and EXPLOIT
+    enable_cross_validator: bool = False    # CrossValidator (more expensive, off by default)

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 import httpx
 
@@ -311,6 +312,169 @@ class OpenRouterClient:
                 raise
 
         raise RuntimeError(f"Failed after {max_retries} retries")
+
+    async def reason_with_tools(
+        self,
+        role: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Callable[..., Awaitable[str]] | None = None,
+        max_tool_rounds: int = 8,
+        structured_output: dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Agentic tool-use loop: send messages, execute tool calls, repeat.
+
+        Falls back to regular reason() if no tools provided.
+
+        Tool-use and response_format (json_schema) are mutually exclusive
+        in OpenAI/OpenRouter, so structured_output is omitted when tools are active.
+        """
+        if not tools or not tool_executor:
+            return await self.reason(
+                role=role,
+                messages=messages,
+                structured_output=structured_output,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        if self.usage.budget_exceeded:
+            raise RuntimeError(
+                f"LLM budget exceeded: ${self.usage.total_cost_usd:.2f} / "
+                f"${self.usage.budget_limit:.2f}"
+            )
+
+        model_config = self.models.get(role)
+        if not model_config:
+            raise ValueError(
+                f"Unknown model role: {role}. Available: {list(self.models.keys())}"
+            )
+
+        # Work on a mutable copy of messages
+        working_messages = list(messages)
+        client = await self._get_client()
+
+        for round_num in range(max_tool_rounds):
+            if self.usage.budget_exceeded:
+                logger.warning("Budget exceeded during tool-use round %d", round_num)
+                break
+
+            payload: dict[str, Any] = {
+                "model": model_config.id,
+                "messages": working_messages,
+                "tools": tools,
+                "temperature": (
+                    temperature if temperature is not None else model_config.temperature
+                ),
+                "max_tokens": (
+                    max_tokens if max_tokens is not None else model_config.max_tokens
+                ),
+            }
+
+            # Send request with retries
+            data: dict[str, Any] | None = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                    )
+                    if response.status_code == 429:
+                        wait = min(2**attempt * 2, 30)
+                        logger.warning("Rate limited in tool loop, waiting %ds...", wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except httpx.HTTPStatusError as e:
+                    if attempt < max_retries - 1 and e.response.status_code >= 500:
+                        await asyncio.sleep(2**attempt)
+                        continue
+                    raise
+
+            if data is None:
+                raise RuntimeError("Failed to get response in tool-use loop")
+
+            # Track usage for this round
+            usage = data.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            cost = usage.get("total_cost", 0.0) or 0.0
+            self.usage.record(model_config.id, input_tokens, output_tokens, cost)
+
+            choices = data.get("choices", [])
+            if not choices:
+                break
+
+            message = choices[0].get("message", {})
+            finish_reason = choices[0].get("finish_reason", "stop")
+
+            # Check for tool calls
+            tool_calls = message.get("tool_calls")
+            if not tool_calls or finish_reason == "stop":
+                # No more tool calls — return final content
+                content = message.get("content", "")
+                return {
+                    "content": content or "",
+                    "model": data.get("model", model_config.id),
+                    "usage": {
+                        "input_tokens": self.usage.total_input_tokens,
+                        "output_tokens": self.usage.total_output_tokens,
+                    },
+                    "raw": data,
+                }
+
+            # Append assistant message with tool_calls
+            working_messages.append(message)
+
+            # Execute each tool call
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                tool_name = fn.get("name", "")
+                try:
+                    arguments = json.loads(fn.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                logger.info(
+                    "Tool call [round %d]: %s(%s)",
+                    round_num + 1,
+                    tool_name,
+                    json.dumps(arguments)[:200],
+                )
+
+                try:
+                    tool_result = await tool_executor(tool_name, arguments)
+                except Exception as e:
+                    tool_result = f"Tool error: {e}"
+                    logger.warning("Tool execution failed: %s", e)
+
+                # Append tool result message
+                working_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": str(tool_result)[:10_000],
+                })
+
+        # Exhausted max rounds — return last content
+        content = ""
+        if working_messages:
+            last = working_messages[-1]
+            if isinstance(last, dict):
+                content = last.get("content", "")
+        return {
+            "content": content or "",
+            "model": model_config.id if model_config else "",
+            "usage": {
+                "input_tokens": self.usage.total_input_tokens,
+                "output_tokens": self.usage.total_output_tokens,
+            },
+            "raw": {},
+        }
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
