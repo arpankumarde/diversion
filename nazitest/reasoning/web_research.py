@@ -7,7 +7,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from brightdata import BrightDataClient
+try:
+    from brightdata import BrightDataClient
+except ImportError:
+    BrightDataClient = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 

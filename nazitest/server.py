@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import orjson
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -88,6 +89,13 @@ active_scans: dict[str, ActiveScan] = {}
 # ── App ──
 
 app = FastAPI(title="nazitest", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 

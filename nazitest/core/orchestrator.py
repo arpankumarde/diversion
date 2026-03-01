@@ -212,9 +212,15 @@ class Orchestrator:
     def _init_web_researcher(self) -> None:
         """Initialize web researcher if BrightData API key is available."""
         if self.settings.brightdata_api_key and self.config.enable_web_research:
-            from nazitest.reasoning.web_research import WebResearcher
-            self._web_researcher = WebResearcher(api_key=self.settings.brightdata_api_key)
-            console.print("[green]Web research enabled[/green] (BrightData)")
+            try:
+                from nazitest.reasoning.web_research import WebResearcher, BrightDataClient
+                if BrightDataClient is None:
+                    console.print("[yellow]Web research disabled[/yellow] (brightdata package not installed — pip install brightdata)")
+                    return
+                self._web_researcher = WebResearcher(api_key=self.settings.brightdata_api_key)
+                console.print("[green]Web research enabled[/green] (BrightData)")
+            except Exception as e:
+                console.print(f"[yellow]Web research disabled[/yellow] ({e})")
         else:
             console.print("[yellow]Web research disabled[/yellow] (no BRIGHTDATA_API_KEY)")
 
